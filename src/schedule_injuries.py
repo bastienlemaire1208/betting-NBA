@@ -160,7 +160,7 @@ def _clean_player_name(raw_name: str) -> str:
 def _match_player_to_roster(player_name: str, team_code: str, raw_players_df: pd.DataFrame | None) -> str:
     """Aligne si possible le nom du joueur avec la liste officielle de l'équipe."""
     cleaned = _clean_player_name(player_name)
-    if not cleaned or raw_players_df is None or raw_players_df.empty:
+    if not cleaned or raw_players_df is None or raw_players_df.empty or "Player" not in raw_players_df.columns:
         return cleaned
 
     sub = raw_players_df
@@ -185,11 +185,10 @@ def _match_player_to_roster(player_name: str, team_code: str, raw_players_df: pd
     return cleaned
 
 
-def _scrape_rotowire_injuries_td(raw_players_df: pd.DataFrame | None = None) -> dict[str, list[str]]:
+def _scrape_rotowire_injuries_td(raw_players_df: pd.DataFrame | None = None) -> tuple[dict[str, list[str]], str]:
     """
     Parse les cellules <td> de RotoWire (Player, Team, Pos, Injury, Status, Est. Return).
-    - Status == 'Out' -> 100% ('Nom Joueur')
-    - Status == 'Questionable' -> 50% ('Nom Joueur [Q 50%]')
+    Retourne (out_by_team, log_message).
     """
     out_by_team: dict[str, list[str]] = {}
     url = "https://www.rotowire.com/basketball/injury-report.php"
@@ -202,6 +201,7 @@ def _scrape_rotowire_injuries_td(raw_players_df: pd.DataFrame | None = None) -> 
         player_idx = 0
         team_idx = 1
         status_idx = 4
+        matched_rows = 0
 
         for row in parser.rows:
             low_cells = [c.lower() for c in row]
@@ -218,7 +218,6 @@ def _scrape_rotowire_injuries_td(raw_players_df: pd.DataFrame | None = None) -> 
             p_raw = row[player_idx].strip()
             t_raw = row[team_idx].strip()
             st_raw = row[status_idx].strip().lower()
-
             if not p_raw:
                 continue
 
@@ -228,12 +227,6 @@ def _scrape_rotowire_injuries_td(raw_players_df: pd.DataFrame | None = None) -> 
                 continue
 
             t_code = normalize_team(t_raw)
-            p_guess = _match_player_to_roster(p_raw, t_code, raw_players_df)
-            if not t_code and raw_players_df is not None and "Team_Code" in raw_players_df.columns and p_guess:
-                matches = raw_players_df[raw_players_df["Player"].astype(str).str.lower() == p_guess.lower()]
-                if not matches.empty:
-                    t_code = normalize_team(str(matches["Team_Code"].iloc[0]))
-
             p_norm = _match_player_to_roster(p_raw, t_code, raw_players_df)
             if not t_code or t_code not in CANONICAL_TO_FULL or not p_norm:
                 continue
@@ -242,31 +235,115 @@ def _scrape_rotowire_injuries_td(raw_players_df: pd.DataFrame | None = None) -> 
             out_by_team.setdefault(t_code, [])
             if entry not in out_by_team[t_code]:
                 out_by_team[t_code].append(entry)
-    except Exception as exc:
-        logger.warning(f"RotoWire injuries indisponible : {exc}")
+                matched_rows += 1
 
-    return out_by_team
+        if matched_rows == 0:
+            msg = f"RotoWire HTTP {resp.status_code} mais 0 joueur Out/Questionable détecté (contenu bloqué ou rendu JS)."
+            logger.warning(msg)
+            return out_by_team, msg
+
+        msg = f"RotoWire OK : {matched_rows} joueur(s) Out/Questionable extrait(s)."
+        logger.info(msg)
+        return out_by_team, msg
+
+    except Exception as exc:
+        msg = f"RotoWire bloqué ou indisponible ({exc})."
+        logger.warning(msg)
+        return out_by_team, msg
+
+
+def read_manual_absents_from_sheet(raw_players_df: pd.DataFrame | None = None) -> tuple[dict[str, list[str]], str]:
+    """
+    Lit l'onglet 'Absents_Manuels' dans Google Sheets (colonnes Team, Player, Status).
+    - Status contenant 'questionable' ou '50' -> 'Nom Joueur [Q 50%]'
+    - Sinon -> 'Nom Joueur' (Out 100%)
+    """
+    out_by_team: dict[str, list[str]] = {}
+    try:
+        from .sheets_sync import get_gspread_client, _get_sheet_id
+        sheet_id = _get_sheet_id()
+        if not sheet_id:
+            return out_by_team, "Absents_Manuels : GOOGLE_SHEET_ID non configuré."
+
+        client = get_gspread_client()
+        sh = client.open_by_key(sheet_id)
+        ws = sh.worksheet("Absents_Manuels")
+        records = ws.get_all_records()
+
+        count = 0
+        for rec in records:
+            t_raw = str(rec.get("Team") or rec.get("Team_Code") or "").strip()
+            p_raw = str(rec.get("Player") or "").strip()
+            st_raw = str(rec.get("Status") or "Out").strip().lower()
+            t_code = normalize_team(t_raw)
+            if not t_code or t_code not in CANONICAL_TO_FULL or not p_raw:
+                continue
+
+            p_norm = _match_player_to_roster(p_raw, t_code, raw_players_df)
+            is_quest = bool(re.search(r"questionable|50%|q50|q 50", st_raw))
+            entry = f"{p_norm} [Q 50%]" if is_quest else p_norm
+
+            out_by_team.setdefault(t_code, [])
+            if entry not in out_by_team[t_code]:
+                out_by_team[t_code].append(entry)
+                count += 1
+
+        msg = f"Absents_Manuels (Google Sheets) : {count} entrée(s) chargée(s)."
+        logger.info(msg)
+        return out_by_team, msg
+    except Exception as exc:
+        msg = f"Absents_Manuels indisponible : {exc}"
+        logger.warning(msg)
+        return out_by_team, msg
 
 
 def fetch_out_players_by_team(raw_players_df: pd.DataFrame | None = None) -> tuple[dict[str, str], str]:
-    """Récupère les joueurs OUT (100%) et Questionable (50%) depuis RotoWire."""
-    roto_map = _scrape_rotowire_injuries_td(raw_players_df)
-    formatted = {t: "; ".join(ps) for t, ps in roto_map.items() if ps}
-    source_label = "RotoWire (Out 100% / Quest. 50%)" if formatted else "Aucun (saisie manuelle)"
-    return formatted, source_label
+    """
+    Récupère les joueurs OUT (100%) et Questionable (50%).
+    Si RotoWire est bloqué ou vide, bascule automatiquement sur l'onglet Google Sheets 'Absents_Manuels'.
+    """
+    roto_map, roto_log = _scrape_rotowire_injuries_td(raw_players_df)
+    manual_map, manual_log = read_manual_absents_from_sheet(raw_players_df)
+
+    merged: dict[str, list[str]] = {}
+    sources_used: list[str] = []
+    logs: list[str] = [roto_log]
+
+    if roto_map:
+        sources_used.append("RotoWire")
+        for t, players in roto_map.items():
+            merged.setdefault(t, [])
+            for p in players:
+                if p not in merged[t]:
+                    merged[t].append(p)
+    else:
+        logs.append(manual_log)
+
+    if manual_map:
+        sources_used.append("Absents_Manuels")
+        for t, players in manual_map.items():
+            merged.setdefault(t, [])
+            for p in players:
+                if p not in merged[t]:
+                    merged[t].append(p)
+
+    formatted = {t: "; ".join(ps) for t, ps in merged.items() if ps}
+    src_title = " + ".join(sources_used) if sources_used else "Aucun absent détecté"
+    full_log = f"{src_title} | {' // '.join(logs)} | Détail={formatted}"
+    return formatted, full_log
 
 
 def build_todays_matchs_df(raw_players_df: pd.DataFrame | None = None) -> tuple[pd.DataFrame, str]:
     """Construit la table des matchs du jour avec Home_B2B, Away_B2B, Home_Out et Away_Out."""
     games_df, _ = fetch_todays_games_with_b2b()
-    out_map, source_label = fetch_out_players_by_team(raw_players_df)
+    out_map, full_log = fetch_out_players_by_team(raw_players_df)
 
     if games_df.empty:
         empty_df = pd.DataFrame(columns=[
             "Match", "Home_Team", "Away_Team", "Home_B2B", "Away_B2B", "Home_Out", "Away_Out"
         ])
-        return empty_df, source_label
+        return empty_df, full_log
 
     games_df["Home_Out"] = games_df["Home_Team"].map(out_map).fillna("")
     games_df["Away_Out"] = games_df["Away_Team"].map(out_map).fillna("")
-    return games_df[["Match", "Home_Team", "Away_Team", "Home_B2B", "Away_B2B", "Home_Out", "Away_Out"]], source_label
+    return games_df[["Match", "Home_Team", "Away_Team", "Home_B2B", "Away_B2B", "Home_Out", "Away_Out"]], full_log
