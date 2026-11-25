@@ -42,6 +42,7 @@ def cached_collect_stats(end_year: int):
 
 for key, default_val in [
     ("stats", None),
+    ("full_matchs_df", None),
     ("matchs_df", None),
     ("out_source", ""),
     ("projections", None),
@@ -50,14 +51,19 @@ for key, default_val in [
         st.session_state[key] = default_val
 
 
+def _drop_cols_defg_app(df: pd.DataFrame) -> pd.DataFrame:
+    """Supprime les colonnes D, E, F et G (index 3, 4, 5, 6) pour l'affichage et Matchs_Ce_Soir."""
+    if df is None or df.empty:
+        return df
+    cols_to_drop = [df.columns[i] for i in [3, 4, 5, 6] if i < len(df.columns)]
+    return df.drop(columns=cols_to_drop).copy()
+
+
 def _extract_value_bets_only(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
     cols = [
-        c for c in [
-            "Match", "Away", "Home", "Home_B2B", "Away_B2B",
-            "Home_Out", "Away_Out", "Signal_Total", "Signal_Handicap"
-        ]
+        c for c in ["Match", "Home_Team", "Away_Team", "Signal_Total", "Signal_Handicap"]
         if c in df.columns
     ]
     sub = df[cols].copy()
@@ -79,34 +85,42 @@ def _run_pipeline(end_year: int, do_sync: bool, custom_matchs: pd.DataFrame | No
     st.session_state["stats"] = stats
 
     if custom_matchs is not None:
-        todays_df = custom_matchs.copy()
+        full_df = custom_matchs.copy()
         out_src = st.session_state.get("out_source", "")
     else:
         raw_players = stats.get("Raw Player Stats")
-        todays_df, out_src = build_todays_matchs_df(raw_players_df=raw_players)
+        full_df, out_src = build_todays_matchs_df(raw_players_df=raw_players)
         st.session_state["out_source"] = out_src
 
-        if todays_df.empty and do_sync:
+        if full_df.empty and do_sync:
             try:
                 existing = read_slate_from_sheet()
                 if existing is not None and not existing.empty:
-                    todays_df = existing
+                    full_df = existing
             except Exception as exc:
                 st.warning(f"Lecture de Matchs_Ce_Soir impossible : {exc}")
 
-    st.session_state["matchs_df"] = todays_df
+    # Conserve B2B et OUT en interne pour le moteur de projection
+    st.session_state["full_matchs_df"] = full_df
     projections = (
-        project_slate(todays_df, stats)
-        if (todays_df is not None and not todays_df.empty)
+        project_slate(full_df, stats)
+        if (full_df is not None and not full_df.empty)
         else pd.DataFrame()
     )
     st.session_state["projections"] = projections
 
+    # Table épurée (sans colonnes D, E, F, G) pour l'app et Matchs_Ce_Soir
+    clean_display_df = _drop_cols_defg_app(full_df)
+    if not projections.empty and not clean_display_df.empty and len(projections) == len(clean_display_df):
+        clean_display_df["Signal_Total"] = projections["Signal_Total"].values
+        clean_display_df["Signal_Handicap"] = projections["Signal_Handicap"].values
+    st.session_state["matchs_df"] = clean_display_df
+
     if do_sync:
         try:
-            updated_matchs = push_all_to_google_sheets(projections, stats, matchs_df=todays_df)
+            updated_matchs = push_all_to_google_sheets(projections, stats, matchs_df=clean_display_df)
             if updated_matchs is not None and not updated_matchs.empty:
-                st.session_state["matchs_df"] = updated_matchs
+                st.session_state["matchs_df"] = _drop_cols_defg_app(updated_matchs)
             st.success(f"Stats, matchs du soir, absents ({out_src or 'manuel'}) et signaux synchronisés sur Google Sheets.")
         except Exception as exc:
             st.warning(f"Calcul terminé, mais la synchronisation Google Sheets a échoué : {exc}")
@@ -122,10 +136,10 @@ if run_btn:
         st.error(f"Erreur lors de l'exécution du moteur : {exc}")
         st.exception(exc)
 
-st.subheader("1. Matchs du soir, B2B, Absents (OUT) & Paris à prendre")
+st.subheader("1. Matchs_Ce_Soir & Paris à prendre")
 if st.session_state["matchs_df"] is not None and not st.session_state["matchs_df"].empty:
     if st.session_state["out_source"]:
-        st.caption(f"Source blessures/absents : {st.session_state['out_source']}")
+        st.caption(f"Source blessures/absents prise en compte dans le calcul : {st.session_state['out_source']}")
     edited_matchs = st.data_editor(
         st.session_state["matchs_df"],
         num_rows="dynamic",
@@ -142,7 +156,12 @@ if st.session_state["matchs_df"] is not None and not st.session_state["matchs_df
     if st.button("Recalculer & mettre à jour Matchs_Ce_Soir"):
         if st.session_state["stats"] is not None:
             try:
-                _run_pipeline(int(season_year), sync_sheets, custom_matchs=edited_matchs)
+                base_for_calc = (
+                    st.session_state["full_matchs_df"]
+                    if st.session_state["full_matchs_df"] is not None and len(st.session_state["full_matchs_df"]) == len(edited_matchs)
+                    else edited_matchs
+                )
+                _run_pipeline(int(season_year), sync_sheets, custom_matchs=base_for_calc)
             except Exception as exc:
                 st.error(f"Erreur lors du recalcul : {exc}")
                 st.exception(exc)
