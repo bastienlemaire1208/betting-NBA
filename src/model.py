@@ -19,10 +19,19 @@ from .config import (
 )
 
 
+def _find_team_column(df: pd.DataFrame | None) -> str | None:
+    if df is None or df.empty:
+        return None
+    for col in ["Team_Code", "Team", "Tm", "TEAM", "team"]:
+        if col in df.columns:
+            return col
+    return None
+
+
 def _parse_out_entry(raw_entry: str) -> tuple[str, float, str]:
     """
-    Extrait le nom du joueur, son poids de présence/absence (1.0 pour Out, 0.5 pour Questionable)
-    et un éventuel tag d'affichage (ex. ' [Q 50%]').
+    Extrait le nom du joueur, son poids (1.0 pour Out, 0.5 pour Questionable)
+    et son tag (' [Q 50%]' ou '').
     """
     txt = str(raw_entry).strip()
     is_quest = bool(re.search(r"\[Q\s*50%\]|\(Q\s*50%\)|\bquestionable\b", txt, flags=re.IGNORECASE))
@@ -44,28 +53,31 @@ def calculate_injury_breakdown(
     pts_l2w: pd.DataFrame,
 ) -> tuple[float, float, str]:
     """
-    Calcule pour chaque joueur absent ou 'Questionable' (pondéré à 50 %) son poids réel
-    selon ses performances de la saison et sa forme récente, avec rendements décroissants
-    si plusieurs joueurs manquent.
-
-    Retourne :
-      - malus_attaque_total : points offensifs perdus par l'équipe
-      - malus_defense_total : points défensifs supplémentaires concédés
-      - detail_handicap_par_joueur : ex. 'OG Anunoby (-2.55 pts); Giannis Antetokounmpo [Q 50%] (-2.46 pts)'
+    Calcule pour chaque joueur absent ('Out') ou incertain ('Questionable' à 50 %)
+    son impact sur l'attaque, la défense et le handicap.
     """
     if not out_players:
         return 0.0, 0.0, ""
 
+    norm_team = normalize_team(team_code) or team_code
+    t_col_ssn = _find_team_column(raw_players)
+    t_col_l2w = _find_team_column(pts_l2w)
+
     team_season = (
-        raw_players[raw_players["Team_Code"] == team_code].copy()
-        if (raw_players is not None and not raw_players.empty and "Team_Code" in raw_players.columns)
+        raw_players[raw_players[t_col_ssn].astype(str).map(normalize_team) == norm_team].copy()
+        if (raw_players is not None and not raw_players.empty and t_col_ssn)
         else pd.DataFrame()
     )
+    if team_season.empty and raw_players is not None and not raw_players.empty:
+        team_season = raw_players.copy()
+
     team_recent = (
-        pts_l2w[pts_l2w["Team_Code"] == team_code].copy()
-        if (pts_l2w is not None and not pts_l2w.empty and "Team_Code" in pts_l2w.columns)
+        pts_l2w[pts_l2w[t_col_l2w].astype(str).map(normalize_team) == norm_team].copy()
+        if (pts_l2w is not None and not pts_l2w.empty and t_col_l2w)
         else pd.DataFrame()
     )
+    if team_recent.empty and pts_l2w is not None and not pts_l2w.empty:
+        team_recent = pts_l2w.copy()
 
     player_impacts = []
     for raw_item in out_players:
@@ -85,19 +97,41 @@ def calculate_injury_breakdown(
             else pd.DataFrame()
         )
 
-        mp = float(match_ssn["MP"].iloc[0]) if not match_ssn.empty and "MP" in match_ssn.columns else 0.0
-        g = float(match_ssn["G"].iloc[0]) if not match_ssn.empty and "G" in match_ssn.columns else 20.0
-        gs = float(match_ssn["GS"].iloc[0]) if not match_ssn.empty and "GS" in match_ssn.columns else 0.0
-        pts_ssn = float(match_ssn["PTS"].iloc[0]) if not match_ssn.empty and "PTS" in match_ssn.columns else 0.0
-        trb = float(match_ssn["TRB"].iloc[0]) if not match_ssn.empty and "TRB" in match_ssn.columns else 0.0
-        ast = float(match_ssn["AST"].iloc[0]) if not match_ssn.empty and "AST" in match_ssn.columns else 0.0
+        # Repli sur la liste globale des joueurs si le joueur a changé d'équipe ou si l'orthographe diffère
+        if match_ssn.empty and raw_players is not None and not raw_players.empty and "Player" in raw_players.columns:
+            parts = [w for w in re.split(r"\W+", p_low) if len(w) > 2]
+            if parts:
+                last_w = parts[-1]
+                match_ssn = raw_players[
+                    raw_players["Player"].astype(str).str.lower().str.contains(rf"\b{re.escape(last_w)}\b", regex=True, na=False)
+                ]
+
+        if match_ssn.empty:
+            # Joueur non trouvé dans les stats : malus de secours calibré (2.20 pts Out / 1.10 pts Q 50%)
+            att_loss = 1.80 * status_mult
+            def_loss = 0.40 * status_mult
+            total_hp_impact = att_loss + def_loss
+            player_impacts.append({
+                "name": f"{p_clean}{tag}",
+                "score": total_hp_impact,
+                "att": att_loss,
+                "def": def_loss,
+            })
+            continue
+
+        mp = float(match_ssn["MP"].iloc[0]) if "MP" in match_ssn.columns and pd.notna(match_ssn["MP"].iloc[0]) else 24.0
+        g = float(match_ssn["G"].iloc[0]) if "G" in match_ssn.columns and pd.notna(match_ssn["G"].iloc[0]) else 20.0
+        gs = float(match_ssn["GS"].iloc[0]) if "GS" in match_ssn.columns and pd.notna(match_ssn["GS"].iloc[0]) else 0.0
+        pts_ssn = float(match_ssn["PTS"].iloc[0]) if "PTS" in match_ssn.columns and pd.notna(match_ssn["PTS"].iloc[0]) else 12.0
+        trb = float(match_ssn["TRB"].iloc[0]) if "TRB" in match_ssn.columns and pd.notna(match_ssn["TRB"].iloc[0]) else 4.0
+        ast = float(match_ssn["AST"].iloc[0]) if "AST" in match_ssn.columns and pd.notna(match_ssn["AST"].iloc[0]) else 2.0
         pts_l14 = (
             float(match_l2w["PTS_L14"].iloc[0])
-            if not match_l2w.empty and "PTS_L14" in match_l2w.columns
+            if not match_l2w.empty and "PTS_L14" in match_l2w.columns and pd.notna(match_l2w["PTS_L14"].iloc[0])
             else pts_ssn
         )
 
-        display_name = str(match_ssn["Player"].iloc[0]) if not match_ssn.empty and "Player" in match_ssn.columns else p_clean
+        display_name = str(match_ssn["Player"].iloc[0]) if "Player" in match_ssn.columns else p_clean
         label_name = f"{display_name}{tag}"
 
         if mp < 10.0 or g < 5.0:
@@ -111,7 +145,6 @@ def calculate_injury_breakdown(
         starter_ratio = min(max(gs / max(g, 1.0), 0.0), 1.0)
         role_mult = 1.0 + 0.15 * starter_ratio
 
-        # Malus de base si le joueur est 100 % OUT, puis pondération (0.50 si Questionable)
         att_loss = min(perf_score * minutes_weight * role_mult * 0.115, 4.2) * status_mult
         def_loss = min(minutes_weight * role_mult * 0.65, 1.2) * status_mult
         total_hp_impact = att_loss + def_loss
@@ -149,7 +182,6 @@ def calculate_injury_impact(
     raw_players: pd.DataFrame,
     pts_l2w: pd.DataFrame,
 ) -> float:
-    """Conserve la compatibilité ascendante en retournant l'impact offensif net."""
     att_val, _, _ = calculate_injury_breakdown(team_code, out_players, raw_players, pts_l2w)
     return att_val
 
@@ -160,7 +192,6 @@ def kelly_stake(
     bankroll: float = BANKROLL_EUR,
     fraction: float = KELLY_FRACTION,
 ) -> float:
-    """Calcule la mise conseillée selon le critère de Kelly fractionné."""
     if decimal_odds <= 1.0 or prob <= 0.0 or prob >= 1.0:
         return 0.0
     b = decimal_odds - 1.0
@@ -172,15 +203,10 @@ def kelly_stake(
 
 
 def _round_to_half(val: float) -> float:
-    """Arrondit une ligne au demi-point le plus proche (format classique PS3838)."""
     return round(val * 2.0) / 2.0
 
 
 def project_slate(slate_df: pd.DataFrame, stats: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """
-    Projette les scores, totaux et handicaps pour la soirée NBA, génère les projections PS3838
-    dans Projections_Value et détermine Signal_Total (colonne K) et Signal_Handicap (colonne R).
-    """
     ppg = stats["Points per game"].set_index("Team")
     oppg = stats["opponent points per game"].set_index("Team")
     win_pct = stats["Win % per game"].set_index("Team")
