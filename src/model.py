@@ -1,3 +1,4 @@
+import re
 import math
 import pandas as pd
 import numpy as np
@@ -18,6 +19,24 @@ from .config import (
 )
 
 
+def _parse_out_entry(raw_entry: str) -> tuple[str, float, str]:
+    """
+    Extrait le nom du joueur, son poids de présence/absence (1.0 pour Out, 0.5 pour Questionable)
+    et un éventuel tag d'affichage (ex. ' [Q 50%]').
+    """
+    txt = str(raw_entry).strip()
+    is_quest = bool(re.search(r"\[Q\s*50%\]|\(Q\s*50%\)|\bquestionable\b", txt, flags=re.IGNORECASE))
+    clean_name = re.sub(
+        r"\s*\[Q\s*50%\]|\s*\(Q\s*50%\)|\s*\bquestionable\b",
+        "",
+        txt,
+        flags=re.IGNORECASE,
+    ).strip(" ,;-")
+    weight = 0.50 if is_quest else 1.0
+    tag = " [Q 50%]" if is_quest else ""
+    return clean_name, weight, tag
+
+
 def calculate_injury_breakdown(
     team_code: str,
     out_players: list[str],
@@ -25,14 +44,14 @@ def calculate_injury_breakdown(
     pts_l2w: pd.DataFrame,
 ) -> tuple[float, float, str]:
     """
-    Calcule pour chaque joueur absent ('OUT') son poids réel selon ses performances de la saison
-    (minutes jouées, statut titulaire/rotation, points pondérés 14j/saison, passes et rebonds)
-    avec rendements décroissants si plusieurs joueurs manquent.
+    Calcule pour chaque joueur absent ou 'Questionable' (pondéré à 50 %) son poids réel
+    selon ses performances de la saison et sa forme récente, avec rendements décroissants
+    si plusieurs joueurs manquent.
 
     Retourne :
-      - malus_attaque_total : points offensifs perdus par l'équipe (positif, soustrait au score projeté)
-      - malus_defense_total : points défensifs supplémentaires concédés (positif, ajouté au score adverse)
-      - detail_handicap_par_joueur : chaîne lisible ex. 'Jayson Tatum (-4.93 pts); Derrick White (-2.20 pts)'
+      - malus_attaque_total : points offensifs perdus par l'équipe
+      - malus_defense_total : points défensifs supplémentaires concédés
+      - detail_handicap_par_joueur : ex. 'OG Anunoby (-2.55 pts); Giannis Antetokounmpo [Q 50%] (-2.46 pts)'
     """
     if not out_players:
         return 0.0, 0.0, ""
@@ -49,8 +68,8 @@ def calculate_injury_breakdown(
     )
 
     player_impacts = []
-    for raw_name in out_players:
-        p_clean = str(raw_name).strip()
+    for raw_item in out_players:
+        p_clean, status_mult, tag = _parse_out_entry(raw_item)
         if not p_clean:
             continue
         p_low = p_clean.lower()
@@ -79,10 +98,10 @@ def calculate_injury_breakdown(
         )
 
         display_name = str(match_ssn["Player"].iloc[0]) if not match_ssn.empty and "Player" in match_ssn.columns else p_clean
+        label_name = f"{display_name}{tag}"
 
-        # Joueur jouant très peu (< 10 min) ou quasi absent de la saison (< 5 matchs) : impact nul
         if mp < 10.0 or g < 5.0:
-            player_impacts.append({"name": display_name, "score": 0.0, "att": 0.0, "def": 0.0})
+            player_impacts.append({"name": label_name, "score": 0.0, "att": 0.0, "def": 0.0})
             continue
 
         pts_weighted = 0.60 * pts_l14 + 0.40 * pts_ssn
@@ -92,18 +111,18 @@ def calculate_injury_breakdown(
         starter_ratio = min(max(gs / max(g, 1.0), 0.0), 1.0)
         role_mult = 1.0 + 0.15 * starter_ratio
 
-        att_loss = min(perf_score * minutes_weight * role_mult * 0.115, 4.2)
-        def_loss = min(minutes_weight * role_mult * 0.65, 1.2)
+        # Malus de base si le joueur est 100 % OUT, puis pondération (0.50 si Questionable)
+        att_loss = min(perf_score * minutes_weight * role_mult * 0.115, 4.2) * status_mult
+        def_loss = min(minutes_weight * role_mult * 0.65, 1.2) * status_mult
         total_hp_impact = att_loss + def_loss
 
         player_impacts.append({
-            "name": display_name,
+            "name": label_name,
             "score": total_hp_impact,
             "att": att_loss,
             "def": def_loss,
         })
 
-    # Trie du joueur le plus impactant au moins impactant pour appliquer le rendement décroissant
     player_impacts.sort(key=lambda item: item["score"], reverse=True)
     diminishing_weights = [1.0, 0.80, 0.65]
 
@@ -179,7 +198,6 @@ def project_slate(slate_df: pd.DataFrame, stats: dict[str, pd.DataFrame]) -> pd.
         if not home or not away or home not in ppg.index or away not in ppg.index:
             continue
 
-        # 1. Moyenne offensive pondérée
         h_off = (
             0.45 * ppg.loc[home, "Season"]
             + 0.30 * ppg.loc[home, "Home"]
@@ -193,7 +211,6 @@ def project_slate(slate_df: pd.DataFrame, stats: dict[str, pd.DataFrame]) -> pd.
             + 0.10 * seasons.loc[away, "PPG_Prev_Season"]
         )
 
-        # 2. Moyenne défensive pondérée
         h_def = (
             0.45 * oppg.loc[home, "Season"]
             + 0.30 * oppg.loc[home, "Home"]
@@ -207,7 +224,6 @@ def project_slate(slate_df: pd.DataFrame, stats: dict[str, pd.DataFrame]) -> pd.
             + 0.10 * seasons.loc[away, "OPPG_Prev_Season"]
         )
 
-        # 3. Projection brute + Net Rating + avantage terrain
         proj_home = (h_off + a_def) / 2.0
         proj_away = (a_off + h_def) / 2.0
 
@@ -215,7 +231,6 @@ def project_slate(slate_df: pd.DataFrame, stats: dict[str, pd.DataFrame]) -> pd.
         proj_home += (HOME_COURT_ADVANTAGE / 2.0) + (net_diff / 2.0)
         proj_away -= (HOME_COURT_ADVANTAGE / 2.0) + (net_diff / 2.0)
 
-        # 4. Ajustement Back-to-Back
         home_b2b = int(row.get("Home_B2B", 0) or 0)
         away_b2b = int(row.get("Away_B2B", 0) or 0)
         if home_b2b:
@@ -225,7 +240,6 @@ def project_slate(slate_df: pd.DataFrame, stats: dict[str, pd.DataFrame]) -> pd.
             proj_away += B2B_PENALTY_OFF
             proj_home += B2B_PENALTY_DEF
 
-        # 5. Ajustement Absents ('OUT') selon performances saison + forme 14j
         home_out_list = [p for p in str(row.get("Home_Out", "")).split(";") if p.strip()]
         away_out_list = [p for p in str(row.get("Away_Out", "")).split(";") if p.strip()]
 
@@ -243,14 +257,12 @@ def project_slate(slate_df: pd.DataFrame, stats: dict[str, pd.DataFrame]) -> pd.
         proj_margin_home = round(proj_home - proj_away, 2)
         proj_home_spread = -proj_margin_home
 
-        # 6. Écarts-types combinés
         std_h = stds.loc[home, "Std_Home"] if home in stds.index else 11.8
         std_a = stds.loc[away, "Std_Away"] if away in stds.index else 12.1
         match_total_std = math.sqrt(std_h**2 + std_a**2)
         if np.isnan(match_total_std) or match_total_std <= 0:
             match_total_std = DEFAULT_TOTAL_STD
 
-        # 7. Projections PS3838 insérées dans Projections_Value
         ps_total_proj = _round_to_half(proj_total)
         ps_spread_proj = _round_to_half(proj_home_spread)
 
@@ -278,7 +290,6 @@ def project_slate(slate_df: pd.DataFrame, stats: dict[str, pd.DataFrame]) -> pd.
         odds_h_sp = float(odds_h_sp_in) if not np.isnan(odds_h_sp_in) else theo_odds_h_sp
         odds_a_sp = float(odds_a_sp_in) if not np.isnan(odds_a_sp_in) else theo_odds_a_sp
 
-        # Analyse Over / Under -> Signal_Total (Colonne K : index 10)
         total_edge_pts = round(proj_total - ps_total, 2)
         prob_over = 1.0 - norm.cdf(ps_total, loc=proj_total, scale=match_total_std)
         prob_under = norm.cdf(ps_total, loc=proj_total, scale=match_total_std)
@@ -303,7 +314,6 @@ def project_slate(slate_df: pd.DataFrame, stats: dict[str, pd.DataFrame]) -> pd.
                 total_ev = round(max(ev_under, 0.0) * 100, 1)
                 total_stake = kelly_stake(prob_under, odds_under)
 
-        # Analyse Handicap -> Signal_Handicap (Colonne R : index 17)
         spread_edge_pts = round(proj_margin_home + ps_spread, 2)
         prob_home_cover = 1.0 - norm.cdf(-ps_spread, loc=proj_margin_home, scale=DEFAULT_MARGIN_STD)
         prob_away_cover = norm.cdf(-ps_spread, loc=proj_margin_home, scale=DEFAULT_MARGIN_STD)
