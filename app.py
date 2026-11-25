@@ -68,7 +68,8 @@ if run_btn or st.session_state["stats"] is None:
             push_all_to_google_sheets(projections, stats)
             st.success("Projections calculées et synchronisées avec Google Sheets.")
     except Exception as exc:
-        st.error(f"Erreur lors de l'exécution du moteur : {exc}")
+        st.error(f"Erreur ({type(exc).__name__}) : {repr(exc)}")
+        st.exception(exc)
 
 st.subheader("1. Carte des matchs & cotes PS3838")
 edited_slate = st.data_editor(
