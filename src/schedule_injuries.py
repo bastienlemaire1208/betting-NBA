@@ -1,9 +1,9 @@
 import re
 import logging
 from datetime import datetime, timedelta, timezone
-from io import StringIO
 import requests
 import pandas as pd
+from bs4 import BeautifulSoup
 from .config import normalize_team, CANONICAL_TO_FULL
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,6 @@ def _extract_games_for_date(yyyymmdd: str) -> list[tuple[str, str]]:
     """Récupère la liste des (Away_Code, Home_Code) pour une date NBA donnée (YYYYMMDD)."""
     games: list[tuple[str, str]] = []
 
-    # Source 1 : ESPN Scoreboard API publique NBA
     url_espn = f"https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates={yyyymmdd}"
     try:
         resp = requests.get(url_espn, headers=HEADERS, timeout=15)
@@ -65,7 +64,6 @@ def _extract_games_for_date(yyyymmdd: str) -> list[tuple[str, str]]:
     except Exception as exc:
         logger.warning(f"ESPN scoreboard indisponible pour {yyyymmdd} : {exc}")
 
-    # Source 2 : NBA CDN Scoreboard quotidien (aujourd'hui principalement)
     if yyyymmdd == _nba_game_date_str(0):
         try:
             resp = requests.get(
@@ -87,11 +85,7 @@ def _extract_games_for_date(yyyymmdd: str) -> list[tuple[str, str]]:
 
 
 def fetch_todays_games_with_b2b() -> tuple[pd.DataFrame, dict[str, int]]:
-    """
-    Récupère les matchs NBA du jour et détecte automatiquement Home_B2B / Away_B2B
-    en comparant avec les matchs de la veille.
-    Retourne (df_matchs_base, b2b_map).
-    """
+    """Récupère les matchs NBA du jour et détecte automatiquement Home_B2B / Away_B2B."""
     today_str = _nba_game_date_str(0)
     yesterday_str = _nba_game_date_str(-1)
 
@@ -142,13 +136,11 @@ def _match_player_to_roster(player_name: str, team_code: str, raw_players_df: pd
             sub = team_sub
 
     target_lower = cleaned.lower()
-    # Correspondance exacte ou partielle
     for p in sub["Player"].dropna().astype(str).tolist():
         p_low = p.lower()
         if target_lower == p_low or target_lower in p_low or p_low in target_lower:
             return p
 
-    # Correspondance par nom de famille
     parts = [w for w in re.split(r"\W+", target_lower) if len(w) > 2]
     if parts:
         last_word = parts[-1]
@@ -159,125 +151,131 @@ def _match_player_to_roster(player_name: str, team_code: str, raw_players_df: pd
     return cleaned
 
 
+def _scrape_cbs_out(raw_players_df: pd.DataFrame | None = None) -> dict[str, list[str]]:
+    """Récupère les joueurs OUT depuis CBS Sports NBA Injuries."""
+    out_by_team: dict[str, list[str]] = {}
+    url = "https://www.cbssports.com/nba/injuries/"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        team_blocks = soup.select("div.TableBase-wrapper, div.Page-colMain section")
+        for block in team_blocks:
+            title_el = block.find(["h4", "h3", "a", "span"], class_=re.compile(r"TeamName|team", re.I))
+            t_code = normalize_team(title_el.get_text(" ", strip=True)) if title_el else ""
+            for tr in block.select("tbody tr"):
+                row_txt = tr.get_text(" | ", strip=True)
+                if re.search(r"\bout\b", row_txt, flags=re.IGNORECASE):
+                    cells = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
+                    p_raw = cells[0] if cells else ""
+                    if not p_raw:
+                        continue
+                    resolved_team = t_code
+                    if not resolved_team and raw_players_df is not None and "Team_Code" in raw_players_df.columns:
+                        p_guess = _match_player_to_roster(p_raw, "", raw_players_df)
+                        m = raw_players_df[raw_players_df["Player"].str.lower() == p_guess.lower()]
+                        if not m.empty:
+                            resolved_team = str(m["Team_Code"].iloc[0])
+                    p_norm = _match_player_to_roster(p_raw, resolved_team, raw_players_df)
+                    if resolved_team in CANONICAL_TO_FULL and p_norm:
+                        out_by_team.setdefault(resolved_team, [])
+                        if p_norm not in out_by_team[resolved_team]:
+                            out_by_team[resolved_team].append(p_norm)
+    except Exception as exc:
+        logger.warning(f"CBS Sports injuries indisponible : {exc}")
+    return out_by_team
+
+
+def _scrape_rotowire_out(raw_players_df: pd.DataFrame | None = None) -> dict[str, list[str]]:
+    """Récupère les joueurs OUT publics depuis RotoWire NBA Injury Report."""
+    out_by_team: dict[str, list[str]] = {}
+    url = "https://www.rotowire.com/basketball/injury-report.php"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        for item in soup.select("div.injury-report__player, div.is-injury, tr"):
+            txt = item.get_text(" ", strip=True)
+            if not re.search(r"\bout\b", txt, flags=re.IGNORECASE):
+                continue
+            name_el = item.find(["a", "span"], class_=re.compile(r"player|name", re.I))
+            team_el = item.find(["span", "div", "td"], class_=re.compile(r"team|abbr", re.I))
+            p_raw = name_el.get_text(" ", strip=True) if name_el else ""
+            t_code = normalize_team(team_el.get_text(" ", strip=True)) if team_el else ""
+            if not t_code and raw_players_df is not None and "Team_Code" in raw_players_df.columns and p_raw:
+                p_guess = _match_player_to_roster(p_raw, "", raw_players_df)
+                m = raw_players_df[raw_players_df["Player"].str.lower() == p_guess.lower()]
+                if not m.empty:
+                    t_code = str(m["Team_Code"].iloc[0])
+            p_norm = _match_player_to_roster(p_raw, t_code, raw_players_df)
+            if t_code in CANONICAL_TO_FULL and p_norm:
+                out_by_team.setdefault(t_code, [])
+                if p_norm not in out_by_team[t_code]:
+                    out_by_team[t_code].append(p_norm)
+    except Exception as exc:
+        logger.warning(f"RotoWire injuries indisponible : {exc}")
+    return out_by_team
+
+
 def _scrape_donbest_out(raw_players_df: pd.DataFrame | None = None) -> dict[str, list[str]]:
-    """Tente d'extraire les joueurs OUT depuis DonBest NBA Injuries."""
+    """Récupère les joueurs OUT depuis DonBest NBA Injuries via BeautifulSoup."""
     out_by_team: dict[str, list[str]] = {}
     url = "https://www.donbest.com/nba/injuries"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.raise_for_status()
-        html = resp.text
+        soup = BeautifulSoup(resp.text, "html.parser")
 
-        # Tentative 1 : tableaux HTML pandas
-        try:
-            tables = pd.read_html(StringIO(html))
-            for tbl in tables:
-                team_col = next((c for c in tbl.columns if any(k in str(c).lower() for k in ["team", "tm"])), None)
-                player_col = next((c for c in tbl.columns if any(k in str(c).lower() for k in ["player", "name"])), None)
-                status_col = next((c for c in tbl.columns if any(k in str(c).lower() for k in ["status", "injury", "inj"])), None)
-
-                if team_col and player_col:
-                    for _, r in tbl.iterrows():
-                        t_code = normalize_team(str(r.get(team_col, "")))
-                        p_raw = str(r.get(player_col, ""))
-                        st_txt = str(r.get(status_col, "")) if status_col else f"{p_raw} {' '.join(str(v) for v in r.values)}"
-                        if t_code and re.search(r"\bout\b", st_txt, flags=re.IGNORECASE):
-                            p_norm = _match_player_to_roster(p_raw, t_code, raw_players_df)
-                            if p_norm:
-                                out_by_team.setdefault(t_code, [])
-                                if p_norm not in out_by_team[t_code]:
-                                    out_by_team[t_code].append(p_norm)
-        except Exception:
-            pass
-
-        # Tentative 2 : parsing léger du texte / lignes HTML si les tableaux sont imbriqués
-        if not out_by_team:
-            text_lines = [re.sub(r"\s+", " ", line).strip() for line in re.sub(r"<[^>]+>", "\n", html).splitlines()]
-            current_team = None
-            for line in text_lines:
-                if not line:
-                    continue
-                t_cand = normalize_team(line)
-                if t_cand in CANONICAL_TO_FULL and len(line) <= 35:
-                    current_team = t_cand
-                    continue
-                if current_team and re.search(r"\bout\b", line, flags=re.IGNORECASE):
-                    p_part = re.split(r"(?i)\bout\b", line)[0]
-                    p_norm = _match_player_to_roster(p_part, current_team, raw_players_df)
-                    if p_norm and len(p_norm) > 2:
-                        out_by_team.setdefault(current_team, [])
-                        if p_norm not in out_by_team[current_team]:
-                            out_by_team[current_team].append(p_norm)
+        current_team = ""
+        for el in soup.find_all(["h2", "h3", "h4", "tr", "li", "div"]):
+            txt = " ".join(el.get_text(" ", strip=True).split())
+            if not txt or len(txt) > 180:
+                continue
+            cand_team = normalize_team(txt)
+            if cand_team in CANONICAL_TO_FULL and len(txt) <= 35:
+                current_team = cand_team
+                continue
+            if re.search(r"\bout\b", txt, flags=re.IGNORECASE):
+                p_part = re.split(r"(?i)\bout\b", txt)[0]
+                t_use = current_team
+                if not t_use and raw_players_df is not None and "Team_Code" in raw_players_df.columns:
+                    p_guess = _match_player_to_roster(p_part, "", raw_players_df)
+                    m = raw_players_df[raw_players_df["Player"].str.lower() == p_guess.lower()]
+                    if not m.empty:
+                        t_use = str(m["Team_Code"].iloc[0])
+                p_norm = _match_player_to_roster(p_part, t_use, raw_players_df)
+                if t_use in CANONICAL_TO_FULL and p_norm and len(p_norm) > 2:
+                    out_by_team.setdefault(t_use, [])
+                    if p_norm not in out_by_team[t_use]:
+                        out_by_team[t_use].append(p_norm)
     except Exception as exc:
-        logger.warning(f"Scraping DonBest injuries indisponible : {exc}")
-
-    return out_by_team
-
-
-def _fetch_espn_injuries_api(raw_players_df: pd.DataFrame | None = None) -> dict[str, list[str]]:
-    """Récupère les joueurs OUT via l'endpoint JSON ESPN injuries (plus fiable que le HTML)."""
-    out_by_team: dict[str, list[str]] = {}
-    url = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries"
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-
-        for team_entry in data.get("injuries", data.get("teams", [])):
-            team_info = team_entry.get("team", team_entry)
-            t_raw = (
-                team_info.get("abbreviation")
-                or team_info.get("displayName")
-                or team_info.get("shortDisplayName")
-                or ""
-            )
-            t_code = normalize_team(t_raw)
-            inj_list = team_entry.get("injuries", []) or team_entry.get("athletes", [])
-
-            for inj in inj_list:
-                status_str = (
-                    inj.get("status")
-                    or inj.get("type", {}).get("description")
-                    or inj.get("type", {}).get("name")
-                    or ""
-                )
-                if re.search(r"\bout\b", str(status_str), flags=re.IGNORECASE):
-                    athlete = inj.get("athlete", inj)
-                    p_raw = athlete.get("displayName") or athlete.get("fullName") or ""
-                    p_norm = _match_player_to_roster(p_raw, t_code, raw_players_df)
-                    if t_code and p_norm:
-                        out_by_team.setdefault(t_code, [])
-                        if p_norm not in out_by_team[t_code]:
-                            out_by_team[t_code].append(p_norm)
-    except Exception as exc:
-        logger.warning(f"API ESPN injuries indisponible : {exc}")
-
+        logger.warning(f"DonBest injuries indisponible : {exc}")
     return out_by_team
 
 
 def fetch_out_players_by_team(raw_players_df: pd.DataFrame | None = None) -> tuple[dict[str, str], str]:
     """
-    Récupère les joueurs OUT par équipe (en privilégiant DonBest, avec complément API ESPN).
-    Retourne ({team_code: "Joueur 1; Joueur 2"}, source_utilisee).
+    Récupère les joueurs OUT par équipe en combinant CBS Sports, RotoWire et DonBest.
     """
-    donbest_map = _scrape_donbest_out(raw_players_df)
-    espn_map = _fetch_espn_injuries_api(raw_players_df)
+    sources = [
+        ("CBS Sports", _scrape_cbs_out(raw_players_df)),
+        ("RotoWire", _scrape_rotowire_out(raw_players_df)),
+        ("DonBest", _scrape_donbest_out(raw_players_df)),
+    ]
 
     merged: dict[str, list[str]] = {}
     sources_used = []
 
-    if donbest_map:
-        sources_used.append("DonBest")
-        for t, players in donbest_map.items():
-            merged[t] = list(players)
-
-    if espn_map:
-        sources_used.append("ESPN API")
-        for t, players in espn_map.items():
-            merged.setdefault(t, [])
-            for p in players:
-                if p not in merged[t]:
-                    merged[t].append(p)
+    for label, src_map in sources:
+        if src_map:
+            sources_used.append(label)
+            for t, players in src_map.items():
+                merged.setdefault(t, [])
+                for p in players:
+                    if p not in merged[t]:
+                        merged[t].append(p)
 
     formatted = {t: "; ".join(ps) for t, ps in merged.items() if ps}
     source_label = " + ".join(sources_used) if sources_used else "Aucun (saisie manuelle)"
@@ -285,9 +283,7 @@ def fetch_out_players_by_team(raw_players_df: pd.DataFrame | None = None) -> tup
 
 
 def build_todays_matchs_df(raw_players_df: pd.DataFrame | None = None) -> tuple[pd.DataFrame, str]:
-    """
-    Construit la table des matchs du jour avec Home_B2B, Away_B2B, Home_Out et Away_Out.
-    """
+    """Construit la table des matchs du jour avec Home_B2B, Away_B2B, Home_Out et Away_Out."""
     games_df, _ = fetch_todays_games_with_b2b()
     out_map, source_label = fetch_out_players_by_team(raw_players_df)
 
