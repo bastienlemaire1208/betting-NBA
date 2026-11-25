@@ -1,5 +1,7 @@
 import logging
 import time
+from datetime import datetime, timedelta, timezone
+import numpy as np
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
@@ -47,6 +49,16 @@ def _get_sheet_id() -> str:
     if secrets is not None and "GOOGLE_SHEET_ID" in secrets:
         return str(secrets["GOOGLE_SHEET_ID"])
     return GOOGLE_SHEET_ID
+
+
+def _nba_today_iso() -> str:
+    """Retourne la date NBA du jour (fuseau US Eastern) au format YYYY-MM-DD."""
+    try:
+        from zoneinfo import ZoneInfo
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        now_et = datetime.now(timezone.utc) - timedelta(hours=5)
+    return now_et.strftime("%Y-%m-%d")
 
 
 def _upsert_worksheet(spreadsheet: gspread.Spreadsheet, title: str, df: pd.DataFrame):
@@ -144,7 +156,7 @@ def inject_signals_into_matchs_ce_soir(spreadsheet: gspread.Spreadsheet, project
     m_headers = matchs_vals[0]
     m_rows = matchs_vals[1:]
 
-    # Conserve uniquement les colonnes utiles (A, B, C) avant d'ajouter Signal_Total et Signal_Handicap
+    # Conserve uniquement les colonnes utiles (A, B, C) avant d'ajouter Signal_Total (D) et Signal_Handicap (E)
     drop_indices = {3, 4, 5, 6} | {i for i, h in enumerate(m_headers) if h in ("Signal_Total", "Signal_Handicap")}
     clean_headers = [h for i, h in enumerate(m_headers) if i not in drop_indices]
     clean_rows = [[val for i, val in enumerate(r) if i not in drop_indices] for r in m_rows]
@@ -174,15 +186,162 @@ def inject_signals_into_matchs_ce_soir(spreadsheet: gspread.Spreadsheet, project
             "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True},
         },
     )
-    logger.info("Colonnes Signal_Total (K) et Signal_Handicap (R) insérées dans Matchs_Ce_Soir (sans D, E, F, G).")
+    logger.info("Colonnes Signal_Total (D) et Signal_Handicap (E) insérées dans Matchs_Ce_Soir.")
     return pd.DataFrame(final_rows, columns=final_headers)
 
 
-def push_all_to_google_sheets(projections_df: pd.DataFrame, stats_dict: dict[str, pd.DataFrame],
-                              matchs_df: pd.DataFrame | None = None) -> pd.DataFrame | None:
+def _extract_value_bets_rows(
+    matchs_df: pd.DataFrame,
+    projections_df: pd.DataFrame | None = None,
+    full_matchs_df: pd.DataFrame | None = None,
+) -> list[dict[str, str]]:
+    """
+    Extrait les value bets actifs des colonnes D (Signal_Total) et E (Signal_Handicap)
+    de Matchs_Ce_Soir, avec pré-remplissage de Cote_PS3838 si présente.
+    """
+    if matchs_df is None or matchs_df.empty:
+        return []
+
+    date_str = _nba_today_iso()
+    rows_out: list[dict[str, str]] = []
+
+    odds_lookup: dict[str, dict[str, str]] = {}
+    for src_df in (full_matchs_df, projections_df):
+        if src_df is None or src_df.empty or "Match" not in src_df.columns:
+            continue
+        for _, r in src_df.iterrows():
+            m_key = str(r.get("Match", "")).strip()
+            if not m_key:
+                continue
+            entry = odds_lookup.setdefault(m_key, {})
+            for col in ("Odds_Over", "Odds_Under", "Odds_Home_Spread", "Odds_Away_Spread"):
+                if col in src_df.columns:
+                    val = pd.to_numeric(r.get(col), errors="coerce")
+                    if not np.isnan(val) and val > 1.0:
+                        entry[col] = f"{float(val):.2f}"
+
+    for _, r in matchs_df.iterrows():
+        match_label = str(r.iloc[0]).strip() if len(r) > 0 else ""
+        home_team = str(r.iloc[1]).strip() if len(r) > 1 else ""
+        sig_total = str(r.iloc[3]).strip() if len(r) > 3 else ""
+        sig_handicap = str(r.iloc[4]).strip() if len(r) > 4 else ""
+
+        m_odds = odds_lookup.get(match_label, {})
+
+        # Colonne D : Signal_Total
+        if sig_total and sig_total.upper() not in ("NO BET", "NAN", "NONE", ""):
+            cote_tot = ""
+            if sig_total.upper().startswith("OVER"):
+                cote_tot = m_odds.get("Odds_Over", "")
+            elif sig_total.upper().startswith("UNDER"):
+                cote_tot = m_odds.get("Odds_Under", "")
+            rows_out.append({
+                "Date": date_str,
+                "Value_Bet": f"{match_label} — {sig_total}",
+                "Cote_PS3838": cote_tot,
+                "Valide": "",
+            })
+
+        # Colonne E : Signal_Handicap
+        if sig_handicap and sig_handicap.upper() not in ("NO BET", "NAN", "NONE", ""):
+            if home_team and sig_handicap.upper().startswith(home_team.upper()):
+                cote_hp = m_odds.get("Odds_Home_Spread", "")
+            else:
+                cote_hp = m_odds.get("Odds_Away_Spread", "")
+            rows_out.append({
+                "Date": date_str,
+                "Value_Bet": f"{match_label} — {sig_handicap}",
+                "Cote_PS3838": cote_hp,
+                "Valide": "",
+            })
+
+    return rows_out
+
+
+def sync_value_bets_history(
+    spreadsheet: gspread.Spreadsheet,
+    matchs_df: pd.DataFrame,
+    projections_df: pd.DataFrame | None = None,
+    full_matchs_df: pd.DataFrame | None = None,
+    tab_name: str = "Historique_ValueBets",
+) -> None:
+    """
+    Incrémente l'onglet Historique_ValueBets (Date | Value_Bet | Cote_PS3838 | Valide)
+    sans dupliquer les paris existants ni écraser les cotes et validations manuelles.
+    """
+    headers = ["Date", "Value_Bet", "Cote_PS3838", "Valide"]
+    try:
+        ws = spreadsheet.worksheet(tab_name)
+    except gspread.WorksheetNotFound:
+        ws = spreadsheet.add_worksheet(title=tab_name, rows=500, cols=4)
+        ws.update(range_name="A1:D1", values=[headers])
+
+    existing_values = ws.get_all_values()
+    if not existing_values:
+        ws.update(range_name="A1:D1", values=[headers])
+        existing_rows = []
+    else:
+        existing_rows = existing_values[1:]
+
+    index_by_key: dict[tuple[str, str], int] = {}
+    normalized_rows: list[list[str]] = []
+    for row in existing_rows:
+        padded = (row + ["", "", "", ""])[:4]
+        key = (padded[0].strip(), padded[1].strip())
+        if key[0] or key[1]:
+            index_by_key[key] = len(normalized_rows)
+            normalized_rows.append(padded)
+
+    new_candidates = _extract_value_bets_rows(
+        matchs_df=matchs_df,
+        projections_df=projections_df,
+        full_matchs_df=full_matchs_df,
+    )
+
+    changed = False
+    for item in new_candidates:
+        key = (item["Date"].strip(), item["Value_Bet"].strip())
+        if key in index_by_key:
+            row_idx = index_by_key[key]
+            # Complète la cote uniquement si elle est encore vide et qu'une cote PS3838 existe
+            if not normalized_rows[row_idx][2].strip() and item["Cote_PS3838"].strip():
+                normalized_rows[row_idx][2] = item["Cote_PS3838"].strip()
+                changed = True
+        else:
+            normalized_rows.append([
+                item["Date"],
+                item["Value_Bet"],
+                item["Cote_PS3838"],
+                item["Valide"],
+            ])
+            index_by_key[key] = len(normalized_rows) - 1
+            changed = True
+
+    if changed or not existing_values:
+        payload = [headers] + normalized_rows
+        ws.clear()
+        ws.update(range_name=f"A1:D{len(payload)}", values=payload, value_input_option="USER_ENTERED")
+        ws.format(
+            "A1:D1",
+            {
+                "backgroundColor": {"red": 0.12, "green": 0.22, "blue": 0.36},
+                "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True},
+            },
+        )
+        time.sleep(0.4)
+        logger.info(f"Onglet '{tab_name}' mis à jour ({len(normalized_rows)} paris au total).")
+
+
+def push_all_to_google_sheets(
+    projections_df: pd.DataFrame,
+    stats_dict: dict[str, pd.DataFrame],
+    matchs_df: pd.DataFrame | None = None,
+    full_matchs_df: pd.DataFrame | None = None,
+) -> pd.DataFrame | None:
     """
     Exporte Projections_Value, met à jour Matchs_Ce_Soir (sans colonnes D, E, F, G),
-    puis insère Signal_Total (col K) et Signal_Handicap (col R) dans Matchs_Ce_Soir.
+    insère Signal_Total (col D) et Signal_Handicap (col E) dans Matchs_Ce_Soir,
+    puis incrémente Historique_ValueBets.
     """
     sheet_id = _get_sheet_id()
     if not sheet_id:
@@ -216,4 +375,11 @@ def push_all_to_google_sheets(projections_df: pd.DataFrame, stats_dict: dict[str
         if dict_key in stats_dict:
             _upsert_worksheet(sh, sheet_title, stats_dict[dict_key])
 
-    return inject_signals_into_matchs_ce_soir(sh, projections_df)
+    updated_matchs = inject_signals_into_matchs_ce_soir(sh, projections_df)
+    sync_value_bets_history(
+        sh,
+        matchs_df=updated_matchs,
+        projections_df=projections_df,
+        full_matchs_df=full_matchs_df,
+    )
+    return updated_matchs
