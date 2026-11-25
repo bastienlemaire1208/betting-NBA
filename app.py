@@ -186,47 +186,97 @@ if st.session_state.get("out_source"):
         st.code(st.session_state["out_source"], language="text")
 
 if st.session_state.get("full_matchs_df") is not None and not st.session_state["full_matchs_df"].empty:
-    with st.expander("🎯 Lignes PS3838 du soir — Total & Handicap (saisie manuelle)", expanded=True):
+    with st.expander("🎯 Lignes PS3838 du soir — Total & Handicap (sans taper de signe moins)", expanded=True):
         st.caption(
-            "Renseigne ici `PS3838_Total` (ex. 238) et `PS3838_Home_Spread` "
-            "(handicap de `Home_Team`, ex. -4.5 si l'équipe à domicile est favorite de 4.5 pts ou +3.5 si outsider)."
+            "Entre `PS3838_Total` (ex. `238`), puis pour le handicap choisis qui est **Favori** (`Home` ou `Away`) "
+            "et saisis uniquement l'écart positif (ex. `4.5` pour -4.5)."
         )
-        base_lines_df = _apply_saved_ps3838_lines(st.session_state["full_matchs_df"])
-        editable_cols = [
-            c for c in ["Match", "Away_Team", "Home_Team", "PS3838_Total", "PS3838_Home_Spread"]
-            if c in base_lines_df.columns
-        ]
-        edited_lines = st.data_editor(
-            base_lines_df[editable_cols],
+        base_lines_df = _apply_saved_ps3838_lines(st.session_state["full_matchs_df"]).reset_index(drop=True)
+        saved_map = dict(st.session_state.get("manual_ps3838_lines") or {})
+
+        helper_rows = []
+        for idx, r in base_lines_df.iterrows():
+            m_key = str(r.get("Match", "")).strip()
+            away_t = str(r.get("Away_Team", "")).strip()
+            home_t = str(r.get("Home_Team", "")).strip()
+            tot_val = pd.to_numeric(r.get("PS3838_Total"), errors="coerce")
+            spr_val = pd.to_numeric(r.get("PS3838_Home_Spread"), errors="coerce")
+
+            saved_item = saved_map.get(m_key, {})
+            fav_default = saved_item.get("Favori", "Home")
+            spread_abs_default = saved_item.get("Handicap_Abs", None)
+
+            if spread_abs_default is None and not np.isnan(spr_val):
+                spread_abs_default = abs(float(spr_val))
+                fav_default = "Home" if float(spr_val) <= 0 else "Away"
+
+            helper_rows.append({
+                "Match": m_key,
+                "Away": away_t,
+                "Home": home_t,
+                "PS3838_Total": None if np.isnan(tot_val) else float(tot_val),
+                "Favori": fav_default,
+                "Handicap_Abs": spread_abs_default,
+            })
+
+        helper_df = pd.DataFrame(helper_rows)
+        edited_helper = st.data_editor(
+            helper_df,
             use_container_width=True,
             hide_index=True,
-            key="ps3838_lines_editor",
+            column_config={
+                "Favori": st.column_config.SelectboxColumn(
+                    "Favori",
+                    options=["Home", "Away"],
+                    required=True,
+                ),
+                "Handicap_Abs": st.column_config.NumberColumn(
+                    "Handicap (valeur positive)",
+                    min_value=0.0,
+                    max_value=40.0,
+                    step=0.5,
+                    format="%.1f",
+                ),
+                "PS3838_Total": st.column_config.NumberColumn(
+                    "PS3838_Total",
+                    min_value=150.0,
+                    max_value=320.0,
+                    step=0.5,
+                    format="%.1f",
+                ),
+            },
+            key="ps3838_helper_editor",
         )
 
         if st.button("⚡ Recalculer avec ces lignes PS3838", use_container_width=True):
             if st.session_state.get("stats") is not None:
-                saved_map = dict(st.session_state.get("manual_ps3838_lines") or {})
                 merged_df = base_lines_df.copy()
-                for idx, r in edited_lines.iterrows():
+                for idx, r in edited_helper.iterrows():
                     m_key = str(r.get("Match", "")).strip()
-                    tot_val = (
-                        pd.to_numeric(r.get("PS3838_Total"), errors="coerce")
-                        if "PS3838_Total" in edited_lines.columns
-                        else np.nan
-                    )
-                    spr_val = (
-                        pd.to_numeric(r.get("PS3838_Home_Spread"), errors="coerce")
-                        if "PS3838_Home_Spread" in edited_lines.columns
-                        else np.nan
-                    )
-                    entry = dict(saved_map.get(m_key, {}))
-                    entry["PS3838_Total"] = None if np.isnan(tot_val) else float(tot_val)
-                    entry["PS3838_Home_Spread"] = None if np.isnan(spr_val) else float(spr_val)
+                    tot_val = pd.to_numeric(r.get("PS3838_Total"), errors="coerce")
+                    fav_side = str(r.get("Favori", "Home")).strip()
+                    abs_sp = pd.to_numeric(r.get("Handicap_Abs"), errors="coerce")
+
+                    if not np.isnan(abs_sp) and abs_sp > 0:
+                        abs_pos = abs(float(abs_sp))
+                        home_spread_signed = -abs_pos if fav_side == "Home" else abs_pos
+                    elif not np.isnan(abs_sp) and abs_sp == 0:
+                        home_spread_signed = 0.0
+                    else:
+                        home_spread_signed = np.nan
+
                     if m_key:
-                        saved_map[m_key] = entry
+                        saved_map[m_key] = {
+                            "PS3838_Total": None if np.isnan(tot_val) else float(tot_val),
+                            "PS3838_Home_Spread": None if np.isnan(home_spread_signed) else float(home_spread_signed),
+                            "Favori": fav_side,
+                            "Handicap_Abs": None if np.isnan(abs_sp) else abs(float(abs_sp)),
+                        }
+
                     if idx < len(merged_df):
                         merged_df.at[idx, "PS3838_Total"] = np.nan if np.isnan(tot_val) else float(tot_val)
-                        merged_df.at[idx, "PS3838_Home_Spread"] = np.nan if np.isnan(spr_val) else float(spr_val)
+                        merged_df.at[idx, "PS3838_Home_Spread"] = home_spread_signed
+
                 st.session_state["manual_ps3838_lines"] = saved_map
                 try:
                     _run_pipeline(int(season_year), sync_sheets, custom_matchs=merged_df)
