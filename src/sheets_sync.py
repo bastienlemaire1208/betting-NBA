@@ -1,4 +1,5 @@
 import logging
+import time
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
@@ -10,6 +11,14 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+
+
+def _drop_cols_defg(df: pd.DataFrame) -> pd.DataFrame:
+    """Supprime les colonnes D, E, F et G (index 3, 4, 5, 6) de Matchs_Ce_Soir."""
+    if df is None or df.empty:
+        return df
+    cols_to_drop = [df.columns[i] for i in [3, 4, 5, 6] if i < len(df.columns)]
+    return df.drop(columns=cols_to_drop).copy()
 
 
 def _get_streamlit_secrets():
@@ -63,18 +72,20 @@ def _upsert_worksheet(spreadsheet: gspread.Spreadsheet, title: str, df: pd.DataF
             "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True},
         },
     )
+    time.sleep(0.4)
     logger.info(f"Onglet '{title}' synchronisé ({len(clean_df)} lignes).")
 
 
 def sync_matchs_ce_soir(matchs_df: pd.DataFrame) -> pd.DataFrame:
-    """Écrit les matchs du soir (Home_Team, Away_Team, Home_B2B, Away_B2B, Home_Out, Away_Out) dans Matchs_Ce_Soir."""
+    """Écrit l'onglet Matchs_Ce_Soir sans les colonnes D, E, F et G."""
     sheet_id = _get_sheet_id()
     if not sheet_id:
         raise ValueError("GOOGLE_SHEET_ID manquant dans Streamlit Secrets ou .env")
     client = get_gspread_client()
     sh = client.open_by_key(sheet_id)
-    _upsert_worksheet(sh, "Matchs_Ce_Soir", matchs_df)
-    return matchs_df
+    cleaned = _drop_cols_defg(matchs_df)
+    _upsert_worksheet(sh, "Matchs_Ce_Soir", cleaned)
+    return cleaned
 
 
 def read_slate_from_sheet() -> pd.DataFrame | None:
@@ -97,7 +108,7 @@ def read_slate_from_sheet() -> pd.DataFrame | None:
 def inject_signals_into_matchs_ce_soir(spreadsheet: gspread.Spreadsheet, projections_df: pd.DataFrame) -> pd.DataFrame:
     """
     Lit les colonnes K (Signal_Total) et R (Signal_Handicap) dans l'onglet 'Projections_Value'
-    et les insère dans 'Matchs_Ce_Soir' pour afficher uniquement les paris à prendre.
+    et les insère dans 'Matchs_Ce_Soir' (sans les colonnes D, E, F, G).
     """
     sig_total_list: list[str] = []
     sig_spread_list: list[str] = []
@@ -107,7 +118,6 @@ def inject_signals_into_matchs_ce_soir(spreadsheet: gspread.Spreadsheet, project
         values = ws_proj.get_all_values()
         if len(values) > 1:
             headers = values[0]
-            # Colonne K = index 10, Colonne R = index 17 (avec recherche par nom en secours)
             idx_k = 10 if len(values[1]) > 10 else (headers.index("Signal_Total") if "Signal_Total" in headers else -1)
             idx_r = 17 if len(values[1]) > 17 else (headers.index("Signal_Handicap") if "Signal_Handicap" in headers else -1)
             for row_vals in values[1:]:
@@ -134,12 +144,11 @@ def inject_signals_into_matchs_ce_soir(spreadsheet: gspread.Spreadsheet, project
     m_headers = matchs_vals[0]
     m_rows = matchs_vals[1:]
 
-    # Nettoyage des anciennes colonnes Signal_Total / Signal_Handicap si déjà présentes
-    drop_indices = {i for i, h in enumerate(m_headers) if h in ("Signal_Total", "Signal_Handicap")}
+    # Conserve uniquement les colonnes utiles (A, B, C) avant d'ajouter Signal_Total et Signal_Handicap
+    drop_indices = {3, 4, 5, 6} | {i for i, h in enumerate(m_headers) if h in ("Signal_Total", "Signal_Handicap")}
     clean_headers = [h for i, h in enumerate(m_headers) if i not in drop_indices]
     clean_rows = [[val for i, val in enumerate(r) if i not in drop_indices] for r in m_rows]
 
-    # Assure l'alignement de longueur
     num_m = len(clean_rows)
     while len(sig_total_list) < num_m:
         sig_total_list.append("")
@@ -165,14 +174,14 @@ def inject_signals_into_matchs_ce_soir(spreadsheet: gspread.Spreadsheet, project
             "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True},
         },
     )
-    logger.info("Colonnes Signal_Total (K) et Signal_Handicap (R) insérées dans Matchs_Ce_Soir.")
+    logger.info("Colonnes Signal_Total (K) et Signal_Handicap (R) insérées dans Matchs_Ce_Soir (sans D, E, F, G).")
     return pd.DataFrame(final_rows, columns=final_headers)
 
 
 def push_all_to_google_sheets(projections_df: pd.DataFrame, stats_dict: dict[str, pd.DataFrame],
                               matchs_df: pd.DataFrame | None = None) -> pd.DataFrame | None:
     """
-    Exporte Projections_Value, met à jour Matchs_Ce_Soir avec les matchs/OUT/B2B,
+    Exporte Projections_Value, met à jour Matchs_Ce_Soir (sans colonnes D, E, F, G),
     puis insère Signal_Total (col K) et Signal_Handicap (col R) dans Matchs_Ce_Soir.
     """
     sheet_id = _get_sheet_id()
@@ -183,9 +192,10 @@ def push_all_to_google_sheets(projections_df: pd.DataFrame, stats_dict: dict[str
     sh = client.open_by_key(sheet_id)
 
     if matchs_df is not None and not matchs_df.empty:
-        _upsert_worksheet(sh, "Matchs_Ce_Soir", matchs_df)
+        _upsert_worksheet(sh, "Matchs_Ce_Soir", _drop_cols_defg(matchs_df))
 
-    _upsert_worksheet(sh, "Projections_Value", projections_df)
+    if projections_df is not None and not projections_df.empty:
+        _upsert_worksheet(sh, "Projections_Value", projections_df)
 
     tab_mapping = {
         "Team Ratings Table": "Team Ratings Table",
