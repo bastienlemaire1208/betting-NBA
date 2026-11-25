@@ -1,5 +1,12 @@
 import streamlit as st
 import pandas as pd
+import os
+import sys
+
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
 from src.scraper import collect_all_stats
 from src.model import project_slate
 from src.schedule_injuries import build_todays_matchs_df
