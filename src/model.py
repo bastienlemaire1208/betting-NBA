@@ -18,49 +18,129 @@ from .config import (
 )
 
 
-def calculate_injury_impact(team_code: str, out_players: list[str],
-                            raw_players: pd.DataFrame, pts_l2w: pd.DataFrame) -> float:
+def calculate_injury_breakdown(
+    team_code: str,
+    out_players: list[str],
+    raw_players: pd.DataFrame,
+    pts_l2w: pd.DataFrame,
+) -> tuple[float, float, str]:
     """
-    Estime l'impact net (en points) des joueurs absents ('OUT') pour une équipe.
-    Prend en compte les points sur les 2 dernières semaines + moyenne saison + remplacement banc.
+    Calcule pour chaque joueur absent ('OUT') son poids réel selon ses performances de la saison
+    (minutes jouées, statut titulaire/rotation, points pondérés 14j/saison, passes et rebonds)
+    avec rendements décroissants si plusieurs joueurs manquent.
+
+    Retourne :
+      - malus_attaque_total : points offensifs perdus par l'équipe (positif, soustrait au score projeté)
+      - malus_defense_total : points défensifs supplémentaires concédés (positif, ajouté au score adverse)
+      - detail_handicap_par_joueur : chaîne lisible ex. 'Jayson Tatum (-4.93 pts); Derrick White (-2.20 pts)'
     """
     if not out_players:
-        return 0.0
+        return 0.0, 0.0, ""
 
-    team_season = raw_players[raw_players["Team_Code"] == team_code].copy()
-    team_recent = pts_l2w[pts_l2w["Team_Code"] == team_code].copy()
+    team_season = (
+        raw_players[raw_players["Team_Code"] == team_code].copy()
+        if (raw_players is not None and not raw_players.empty and "Team_Code" in raw_players.columns)
+        else pd.DataFrame()
+    )
+    team_recent = (
+        pts_l2w[pts_l2w["Team_Code"] == team_code].copy()
+        if (pts_l2w is not None and not pts_l2w.empty and "Team_Code" in pts_l2w.columns)
+        else pd.DataFrame()
+    )
 
-    total_penalty = 0.0
-    for player_name in out_players:
-        p_clean = player_name.strip().lower()
+    player_impacts = []
+    for raw_name in out_players:
+        p_clean = str(raw_name).strip()
         if not p_clean:
             continue
+        p_low = p_clean.lower()
 
-        match_l2w = team_recent[team_recent["Player"].str.lower().str.contains(p_clean, na=False)]
-        match_ssn = team_season[team_season["Player"].str.lower().str.contains(p_clean, na=False)]
+        match_l2w = (
+            team_recent[team_recent["Player"].astype(str).str.lower().str.contains(p_low, regex=False, na=False)]
+            if not team_recent.empty and "Player" in team_recent.columns
+            else pd.DataFrame()
+        )
+        match_ssn = (
+            team_season[team_season["Player"].astype(str).str.lower().str.contains(p_low, regex=False, na=False)]
+            if not team_season.empty and "Player" in team_season.columns
+            else pd.DataFrame()
+        )
 
-        pts_l14 = float(match_l2w["PTS_L14"].iloc[0]) if not match_l2w.empty else None
-        pts_ssn = float(match_ssn["PTS"].iloc[0]) if not match_ssn.empty else None
-        mp_ssn = float(match_ssn["MP"].iloc[0]) if not match_ssn.empty else 25.0
+        mp = float(match_ssn["MP"].iloc[0]) if not match_ssn.empty and "MP" in match_ssn.columns else 0.0
+        g = float(match_ssn["G"].iloc[0]) if not match_ssn.empty and "G" in match_ssn.columns else 20.0
+        gs = float(match_ssn["GS"].iloc[0]) if not match_ssn.empty and "GS" in match_ssn.columns else 0.0
+        pts_ssn = float(match_ssn["PTS"].iloc[0]) if not match_ssn.empty and "PTS" in match_ssn.columns else 0.0
+        trb = float(match_ssn["TRB"].iloc[0]) if not match_ssn.empty and "TRB" in match_ssn.columns else 0.0
+        ast = float(match_ssn["AST"].iloc[0]) if not match_ssn.empty and "AST" in match_ssn.columns else 0.0
+        pts_l14 = (
+            float(match_l2w["PTS_L14"].iloc[0])
+            if not match_l2w.empty and "PTS_L14" in match_l2w.columns
+            else pts_ssn
+        )
 
-        if pts_l14 is not None and pts_ssn is not None:
-            player_pts = 0.60 * pts_l14 + 0.40 * pts_ssn
-        elif pts_l14 is not None:
-            player_pts = pts_l14
-        elif pts_ssn is not None:
-            player_pts = pts_ssn
-        else:
+        display_name = str(match_ssn["Player"].iloc[0]) if not match_ssn.empty and "Player" in match_ssn.columns else p_clean
+
+        # Joueur jouant très peu (< 10 min) ou quasi absent de la saison (< 5 matchs) : impact nul
+        if mp < 10.0 or g < 5.0:
+            player_impacts.append({"name": display_name, "score": 0.0, "att": 0.0, "def": 0.0})
             continue
 
-        replacement_factor = 0.48 if mp_ssn >= 28 else 0.35
-        net_loss = player_pts * (1.0 - replacement_factor)
-        total_penalty += net_loss
+        pts_weighted = 0.60 * pts_l14 + 0.40 * pts_ssn
+        perf_score = pts_weighted + 0.35 * ast + 0.15 * trb
 
-    return round(total_penalty, 2)
+        minutes_weight = min(max((mp - 10.0) / 26.0, 0.0), 1.15)
+        starter_ratio = min(max(gs / max(g, 1.0), 0.0), 1.0)
+        role_mult = 1.0 + 0.15 * starter_ratio
+
+        att_loss = min(perf_score * minutes_weight * role_mult * 0.115, 4.2)
+        def_loss = min(minutes_weight * role_mult * 0.65, 1.2)
+        total_hp_impact = att_loss + def_loss
+
+        player_impacts.append({
+            "name": display_name,
+            "score": total_hp_impact,
+            "att": att_loss,
+            "def": def_loss,
+        })
+
+    # Trie du joueur le plus impactant au moins impactant pour appliquer le rendement décroissant
+    player_impacts.sort(key=lambda item: item["score"], reverse=True)
+    diminishing_weights = [1.0, 0.80, 0.65]
+
+    total_att = 0.0
+    total_def = 0.0
+    details = []
+
+    for idx, item in enumerate(player_impacts):
+        factor = diminishing_weights[idx] if idx < len(diminishing_weights) else 0.50
+        att_val = round(item["att"] * factor, 2)
+        def_val = round(item["def"] * factor, 2)
+        hp_val = round(att_val + def_val, 2)
+
+        total_att += att_val
+        total_def += def_val
+        details.append(f"{item['name']} (-{hp_val:.2f} pts)")
+
+    return round(total_att, 2), round(total_def, 2), "; ".join(details)
 
 
-def kelly_stake(prob: float, decimal_odds: float, bankroll: float = BANKROLL_EUR,
-                fraction: float = KELLY_FRACTION) -> float:
+def calculate_injury_impact(
+    team_code: str,
+    out_players: list[str],
+    raw_players: pd.DataFrame,
+    pts_l2w: pd.DataFrame,
+) -> float:
+    """Conserve la compatibilité ascendante en retournant l'impact offensif net."""
+    att_val, _, _ = calculate_injury_breakdown(team_code, out_players, raw_players, pts_l2w)
+    return att_val
+
+
+def kelly_stake(
+    prob: float,
+    decimal_odds: float,
+    bankroll: float = BANKROLL_EUR,
+    fraction: float = KELLY_FRACTION,
+) -> float:
     """Calcule la mise conseillée selon le critère de Kelly fractionné."""
     if decimal_odds <= 1.0 or prob <= 0.0 or prob >= 1.0:
         return 0.0
@@ -91,7 +171,6 @@ def project_slate(slate_df: pd.DataFrame, stats: dict[str, pd.DataFrame]) -> pd.
     raw_players = stats["Raw Player Stats"]
     pts_l2w = stats["PTS last 2 weeks"]
 
-    league_avg_ppg = ppg["Season"].mean()
     results = []
 
     for _, row in slate_df.iterrows():
@@ -146,18 +225,23 @@ def project_slate(slate_df: pd.DataFrame, stats: dict[str, pd.DataFrame]) -> pd.
             proj_away += B2B_PENALTY_OFF
             proj_home += B2B_PENALTY_DEF
 
-        # 5. Ajustement Absents ('OUT')
+        # 5. Ajustement Absents ('OUT') selon performances saison + forme 14j
         home_out_list = [p for p in str(row.get("Home_Out", "")).split(";") if p.strip()]
         away_out_list = [p for p in str(row.get("Away_Out", "")).split(";") if p.strip()]
-        home_inj_pen = calculate_injury_impact(home, home_out_list, raw_players, pts_l2w)
-        away_inj_pen = calculate_injury_impact(away, away_out_list, raw_players, pts_l2w)
 
-        proj_home -= home_inj_pen
-        proj_away -= away_inj_pen
+        home_att_pen, home_def_pen, home_hp_detail = calculate_injury_breakdown(
+            home, home_out_list, raw_players, pts_l2w
+        )
+        away_att_pen, away_def_pen, away_hp_detail = calculate_injury_breakdown(
+            away, away_out_list, raw_players, pts_l2w
+        )
+
+        proj_home = proj_home - home_att_pen + away_def_pen
+        proj_away = proj_away - away_att_pen + home_def_pen
 
         proj_total = round(proj_home + proj_away, 2)
-        proj_margin_home = round(proj_home - proj_away, 2)  # Positif = victoire domicile
-        proj_home_spread = -proj_margin_home            # Négatif = favori à domicile
+        proj_margin_home = round(proj_home - proj_away, 2)
+        proj_home_spread = -proj_margin_home
 
         # 6. Écarts-types combinés
         std_h = stds.loc[home, "Std_Home"] if home in stds.index else 11.8
@@ -166,11 +250,10 @@ def project_slate(slate_df: pd.DataFrame, stats: dict[str, pd.DataFrame]) -> pd.
         if np.isnan(match_total_std) or match_total_std <= 0:
             match_total_std = DEFAULT_TOTAL_STD
 
-        # 7. Projections PS3838 insérées dans Projections_Value (sans import externe de cotes)
+        # 7. Projections PS3838 insérées dans Projections_Value
         ps_total_proj = _round_to_half(proj_total)
         ps_spread_proj = _round_to_half(proj_home_spread)
 
-        # Cote théorique juste (1/p) autour de la ligne projetée
         prob_over_proj = 1.0 - norm.cdf(ps_total_proj, loc=proj_total, scale=match_total_std)
         prob_under_proj = norm.cdf(ps_total_proj, loc=proj_total, scale=match_total_std)
         theo_odds_over = round(1.0 / max(prob_over_proj, 1e-4), 2)
@@ -181,7 +264,6 @@ def project_slate(slate_df: pd.DataFrame, stats: dict[str, pd.DataFrame]) -> pd.
         theo_odds_h_sp = round(1.0 / max(prob_home_sp_proj, 1e-4), 2)
         theo_odds_a_sp = round(1.0 / max(prob_away_sp_proj, 1e-4), 2)
 
-        # Si l'utilisateur a tout de même renseigné une ligne manuelle, on l'utilise ; sinon projection PS3838
         ps_total_in = pd.to_numeric(row.get("PS3838_Total"), errors="coerce")
         ps_total = float(ps_total_in) if not np.isnan(ps_total_in) else ps_total_proj
         odds_over_in = pd.to_numeric(row.get("Odds_Over"), errors="coerce")
@@ -246,37 +328,38 @@ def project_slate(slate_df: pd.DataFrame, stats: dict[str, pd.DataFrame]) -> pd.
                 spread_ev = round(max(ev_a, 0.0) * 100, 1)
                 spread_stake = kelly_stake(prob_away_cover, odds_a_sp)
 
-        # Ordre exact des colonnes pour que :
-        # Colonne K (11e colonne, index 10) = Signal_Total
-        # Colonne R (18e colonne, index 17) = Signal_Handicap
         results.append({
-            "Match": f"{CANONICAL_TO_FULL.get(away, away)} @ {CANONICAL_TO_FULL.get(home, home)}",  # A (1)
-            "Away": away,                                                                          # B (2)
-            "Home": home,                                                                          # C (3)
-            "Win%_Away": round(win_pct.loc[away, "Season"] * 100, 1),                            # D (4)
-            "Win%_Home": round(win_pct.loc[home, "Season"] * 100, 1),                            # E (5)
-            "Proj_Away": round(proj_away, 1),                                                      # F (6)
-            "Proj_Home": round(proj_home, 1),                                                      # G (7)
-            "Proj_Total": proj_total,                                                              # H (8)
-            "PS3838_Total": ps_total,                                                              # I (9)
-            "Diff_Total": total_edge_pts,                                                          # J (10)
-            "Signal_Total": total_signal,                                                          # K (11) -> Colonne K
-            "Prob_Total_%": total_prob,                                                            # L (12)
-            "EV_Total_%": total_ev,                                                              # M (13)
-            "Mise_Total_EUR": total_stake,                                                         # N (14)
-            "Proj_Handicap_Home": round(proj_home_spread, 1),                                      # O (15)
-            "PS3838_Handicap_Home": ps_spread,                                                     # P (16)
-            "Diff_Handicap": spread_edge_pts,                                                      # Q (17)
-            "Signal_Handicap": spread_signal,                                                      # R (18) -> Colonne R
-            "Prob_Handicap_%": spread_prob,                                                        # S (19)
-            "EV_Handicap_%": spread_ev,                                                          # T (20)
-            "Mise_Handicap_EUR": spread_stake,                                                     # U (21)
-            "Cote_Theo_Over": theo_odds_over,                                                      # V (22)
-            "Cote_Theo_Under": theo_odds_under,                                                    # W (23)
-            "Cote_Theo_Home_Spread": theo_odds_h_sp,                                               # X (24)
-            "Cote_Theo_Away_Spread": theo_odds_a_sp,                                               # Y (25)
-            "Malus_Absents_Home": home_inj_pen,                                                    # Z (26)
-            "Malus_Absents_Away": away_inj_pen,                                                    # AA (27)
+            "Match": f"{CANONICAL_TO_FULL.get(away, away)} @ {CANONICAL_TO_FULL.get(home, home)}",
+            "Away": away,
+            "Home": home,
+            "Win%_Away": round(win_pct.loc[away, "Season"] * 100, 1),
+            "Win%_Home": round(win_pct.loc[home, "Season"] * 100, 1),
+            "Proj_Away": round(proj_away, 1),
+            "Proj_Home": round(proj_home, 1),
+            "Proj_Total": proj_total,
+            "PS3838_Total": ps_total,
+            "Diff_Total": total_edge_pts,
+            "Signal_Total": total_signal,
+            "Prob_Total_%": total_prob,
+            "EV_Total_%": total_ev,
+            "Mise_Total_EUR": total_stake,
+            "Proj_Handicap_Home": round(proj_home_spread, 1),
+            "PS3838_Handicap_Home": ps_spread,
+            "Diff_Handicap": spread_edge_pts,
+            "Signal_Handicap": spread_signal,
+            "Prob_Handicap_%": spread_prob,
+            "EV_Handicap_%": spread_ev,
+            "Mise_Handicap_EUR": spread_stake,
+            "Cote_Theo_Over": theo_odds_over,
+            "Cote_Theo_Under": theo_odds_under,
+            "Cote_Theo_Home_Spread": theo_odds_h_sp,
+            "Cote_Theo_Away_Spread": theo_odds_a_sp,
+            "Malus_Att_Absents_Home": home_att_pen,
+            "Malus_Att_Absents_Away": away_att_pen,
+            "Malus_Def_Absents_Home": home_def_pen,
+            "Malus_Def_Absents_Away": away_def_pen,
+            "Impact_Handicap_Absents_Home": home_hp_detail,
+            "Impact_Handicap_Absents_Away": away_hp_detail,
         })
 
     return pd.DataFrame(results)
