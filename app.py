@@ -1,7 +1,7 @@
-import streamlit as st
-import pandas as pd
 import os
 import sys
+import pandas as pd
+import streamlit as st
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
@@ -33,6 +33,7 @@ with st.sidebar:
     )
     sync_sheets = st.checkbox("Synchroniser avec Google Sheets", value=True)
     run_btn = st.button("🚀 Lancer / Actualiser les projections", type="primary", use_container_width=True)
+    force_refresh_btn = st.button("🔄 Vider le cache & relire Absents_Manuels", use_container_width=True)
 
 
 @st.cache_data(ttl=1800, show_spinner="Collecte des statistiques NBA en cours...")
@@ -49,6 +50,12 @@ for key, default_val in [
 ]:
     if key not in st.session_state:
         st.session_state[key] = default_val
+
+
+def _reset_pipeline_state() -> None:
+    st.cache_data.clear()
+    for key in ("stats", "full_matchs_df", "matchs_df", "out_source", "projections"):
+        st.session_state[key] = None if key != "out_source" else ""
 
 
 def _drop_cols_defg_app(df: pd.DataFrame) -> pd.DataFrame:
@@ -129,13 +136,20 @@ def _run_pipeline(end_year: int, do_sync: bool, custom_matchs: pd.DataFrame | No
         st.success(f"Projections calculées (source absents : {out_src or 'manuel'}).")
 
 
-if run_btn:
+if force_refresh_btn:
+    _reset_pipeline_state()
+    try:
+        _run_pipeline(int(season_year), sync_sheets, custom_matchs=None)
+    except Exception as exc:
+        st.error(f"Erreur lors du rechargement forcé : {exc}")
+        st.exception(exc)
+elif run_btn:
     try:
         _run_pipeline(int(season_year), sync_sheets, custom_matchs=None)
     except Exception as exc:
         st.error(f"Erreur lors de l'exécution du moteur : {exc}")
         st.exception(exc)
-        
+
 if st.session_state.get("out_source"):
     with st.expander("📋 Logs absents détectés (RotoWire / Absents_Manuels)", expanded=True):
         st.code(st.session_state["out_source"], language="text")
