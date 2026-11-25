@@ -135,6 +135,10 @@ if run_btn:
     except Exception as exc:
         st.error(f"Erreur lors de l'exécution du moteur : {exc}")
         st.exception(exc)
+        
+if st.session_state.get("out_source"):
+    with st.expander("📋 Logs absents détectés (RotoWire / Absents_Manuels)", expanded=True):
+        st.code(st.session_state["out_source"], language="text")
 
 st.subheader("1. Matchs_Ce_Soir & Paris à prendre")
 if st.session_state["matchs_df"] is not None and not st.session_state["matchs_df"].empty:
