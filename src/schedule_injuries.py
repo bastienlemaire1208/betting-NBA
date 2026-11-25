@@ -172,7 +172,6 @@ def _scrape_donbest_out(raw_players_df: pd.DataFrame | None = None) -> dict[str,
         try:
             tables = pd.read_html(StringIO(html))
             for tbl in tables:
-                cols_low = [str(c).lower() for c in tbl.columns]
                 team_col = next((c for c in tbl.columns if any(k in str(c).lower() for k in ["team", "tm"])), None)
                 player_col = next((c for c in tbl.columns if any(k in str(c).lower() for k in ["player", "name"])), None)
                 status_col = next((c for c in tbl.columns if any(k in str(c).lower() for k in ["status", "injury", "inj"])), None)
@@ -215,44 +214,54 @@ def _scrape_donbest_out(raw_players_df: pd.DataFrame | None = None) -> dict[str,
     return out_by_team
 
 
-def _scrape_espn_out(raw_players_df: pd.DataFrame | None = None) -> dict[str, list[str]]:
-    """Source de secours fiable : rapport de blessures ESPN NBA."""
+def _fetch_espn_injuries_api(raw_players_df: pd.DataFrame | None = None) -> dict[str, list[str]]:
+    """Récupère les joueurs OUT via l'endpoint JSON ESPN injuries (plus fiable que le HTML)."""
     out_by_team: dict[str, list[str]] = {}
-    url = "https://www.espn.com/nba/injuries"
+    url = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         resp.raise_for_status()
-        tables = pd.read_html(StringIO(resp.text))
-        for tbl in tables:
-            player_col = next((c for c in tbl.columns if str(c).lower() in ["name", "player"]), None)
-            status_col = next((c for c in tbl.columns if "status" in str(c).lower()), None)
-            if not player_col:
-                continue
-            for _, r in tbl.iterrows():
-                status_val = str(r.get(status_col, "")) if status_col else " ".join(str(v) for v in r.values)
-                if re.search(r"\bout\b", status_val, flags=re.IGNORECASE):
-                    p_raw = str(r.get(player_col, ""))
-                    p_norm = _match_player_to_roster(p_raw, "", raw_players_df)
-                    if p_norm and raw_players_df is not None and "Team_Code" in raw_players_df.columns:
-                        matches = raw_players_df[raw_players_df["Player"].str.lower() == p_norm.lower()]
-                        if not matches.empty:
-                            t_code = str(matches["Team_Code"].iloc[0])
-                            if t_code in CANONICAL_TO_FULL:
-                                out_by_team.setdefault(t_code, [])
-                                if p_norm not in out_by_team[t_code]:
-                                    out_by_team[t_code].append(p_norm)
+        data = resp.json()
+
+        for team_entry in data.get("injuries", data.get("teams", [])):
+            team_info = team_entry.get("team", team_entry)
+            t_raw = (
+                team_info.get("abbreviation")
+                or team_info.get("displayName")
+                or team_info.get("shortDisplayName")
+                or ""
+            )
+            t_code = normalize_team(t_raw)
+            inj_list = team_entry.get("injuries", []) or team_entry.get("athletes", [])
+
+            for inj in inj_list:
+                status_str = (
+                    inj.get("status")
+                    or inj.get("type", {}).get("description")
+                    or inj.get("type", {}).get("name")
+                    or ""
+                )
+                if re.search(r"\bout\b", str(status_str), flags=re.IGNORECASE):
+                    athlete = inj.get("athlete", inj)
+                    p_raw = athlete.get("displayName") or athlete.get("fullName") or ""
+                    p_norm = _match_player_to_roster(p_raw, t_code, raw_players_df)
+                    if t_code and p_norm:
+                        out_by_team.setdefault(t_code, [])
+                        if p_norm not in out_by_team[t_code]:
+                            out_by_team[t_code].append(p_norm)
     except Exception as exc:
-        logger.warning(f"Scraping ESPN injuries indisponible : {exc}")
+        logger.warning(f"API ESPN injuries indisponible : {exc}")
+
     return out_by_team
 
 
 def fetch_out_players_by_team(raw_players_df: pd.DataFrame | None = None) -> tuple[dict[str, str], str]:
     """
-    Récupère les joueurs OUT par équipe (en privilégiant DonBest, avec complément ESPN).
+    Récupère les joueurs OUT par équipe (en privilégiant DonBest, avec complément API ESPN).
     Retourne ({team_code: "Joueur 1; Joueur 2"}, source_utilisee).
     """
     donbest_map = _scrape_donbest_out(raw_players_df)
-    espn_map = _scrape_espn_out(raw_players_df)
+    espn_map = _fetch_espn_injuries_api(raw_players_df)
 
     merged: dict[str, list[str]] = {}
     sources_used = []
@@ -263,7 +272,7 @@ def fetch_out_players_by_team(raw_players_df: pd.DataFrame | None = None) -> tup
             merged[t] = list(players)
 
     if espn_map:
-        sources_used.append("ESPN")
+        sources_used.append("ESPN API")
         for t, players in espn_map.items():
             merged.setdefault(t, [])
             for p in players:
