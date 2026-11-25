@@ -1,5 +1,6 @@
 import os
 import sys
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -47,6 +48,7 @@ for key, default_val in [
     ("matchs_df", None),
     ("out_source", ""),
     ("projections", None),
+    ("manual_ps3838_lines", {}),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default_val
@@ -56,6 +58,28 @@ def _reset_pipeline_state() -> None:
     st.cache_data.clear()
     for key in ("stats", "full_matchs_df", "matchs_df", "out_source", "projections"):
         st.session_state[key] = None if key != "out_source" else ""
+
+
+def _apply_saved_ps3838_lines(df: pd.DataFrame) -> pd.DataFrame:
+    """Réapplique les lignes PS3838 (Total et Handicap Home) saisies manuellement par match."""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    if "PS3838_Total" not in out.columns:
+        out["PS3838_Total"] = np.nan
+    if "PS3838_Home_Spread" not in out.columns:
+        out["PS3838_Home_Spread"] = np.nan
+
+    saved = st.session_state.get("manual_ps3838_lines") or {}
+    if saved and "Match" in out.columns:
+        for idx, r in out.iterrows():
+            m_key = str(r.get("Match", "")).strip()
+            if m_key in saved:
+                if saved[m_key].get("PS3838_Total") is not None:
+                    out.at[idx, "PS3838_Total"] = saved[m_key]["PS3838_Total"]
+                if saved[m_key].get("PS3838_Home_Spread") is not None:
+                    out.at[idx, "PS3838_Home_Spread"] = saved[m_key]["PS3838_Home_Spread"]
+    return out
 
 
 def _drop_cols_defg_app(df: pd.DataFrame) -> pd.DataFrame:
@@ -107,7 +131,9 @@ def _run_pipeline(end_year: int, do_sync: bool, custom_matchs: pd.DataFrame | No
             except Exception as exc:
                 st.warning(f"Lecture de Matchs_Ce_Soir impossible : {exc}")
 
-    # Conserve B2B et OUT en interne pour le moteur de projection
+    full_df = _apply_saved_ps3838_lines(full_df)
+
+    # Conserve B2B, OUT et lignes PS3838 (Total et Handicap) en interne pour le moteur de projection
     st.session_state["full_matchs_df"] = full_df
     projections = (
         project_slate(full_df, stats)
@@ -158,6 +184,58 @@ elif run_btn:
 if st.session_state.get("out_source"):
     with st.expander("📋 Logs absents détectés (RotoWire / Absents_Manuels)", expanded=True):
         st.code(st.session_state["out_source"], language="text")
+
+if st.session_state.get("full_matchs_df") is not None and not st.session_state["full_matchs_df"].empty:
+    with st.expander("🎯 Lignes PS3838 du soir — Total & Handicap (saisie manuelle)", expanded=True):
+        st.caption(
+            "Renseigne ici `PS3838_Total` (ex. 238) et `PS3838_Home_Spread` "
+            "(handicap de `Home_Team`, ex. -4.5 si l'équipe à domicile est favorite de 4.5 pts ou +3.5 si outsider)."
+        )
+        base_lines_df = _apply_saved_ps3838_lines(st.session_state["full_matchs_df"])
+        editable_cols = [
+            c for c in ["Match", "Away_Team", "Home_Team", "PS3838_Total", "PS3838_Home_Spread"]
+            if c in base_lines_df.columns
+        ]
+        edited_lines = st.data_editor(
+            base_lines_df[editable_cols],
+            use_container_width=True,
+            hide_index=True,
+            key="ps3838_lines_editor",
+        )
+
+        if st.button("⚡ Recalculer avec ces lignes PS3838", use_container_width=True):
+            if st.session_state.get("stats") is not None:
+                saved_map = dict(st.session_state.get("manual_ps3838_lines") or {})
+                merged_df = base_lines_df.copy()
+                for idx, r in edited_lines.iterrows():
+                    m_key = str(r.get("Match", "")).strip()
+                    tot_val = (
+                        pd.to_numeric(r.get("PS3838_Total"), errors="coerce")
+                        if "PS3838_Total" in edited_lines.columns
+                        else np.nan
+                    )
+                    spr_val = (
+                        pd.to_numeric(r.get("PS3838_Home_Spread"), errors="coerce")
+                        if "PS3838_Home_Spread" in edited_lines.columns
+                        else np.nan
+                    )
+                    entry = dict(saved_map.get(m_key, {}))
+                    entry["PS3838_Total"] = None if np.isnan(tot_val) else float(tot_val)
+                    entry["PS3838_Home_Spread"] = None if np.isnan(spr_val) else float(spr_val)
+                    if m_key:
+                        saved_map[m_key] = entry
+                    if idx < len(merged_df):
+                        merged_df.at[idx, "PS3838_Total"] = np.nan if np.isnan(tot_val) else float(tot_val)
+                        merged_df.at[idx, "PS3838_Home_Spread"] = np.nan if np.isnan(spr_val) else float(spr_val)
+                st.session_state["manual_ps3838_lines"] = saved_map
+                try:
+                    _run_pipeline(int(season_year), sync_sheets, custom_matchs=merged_df)
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Erreur lors du recalcul avec lignes PS3838 : {exc}")
+                    st.exception(exc)
+            else:
+                st.info("Lance d'abord les projections au moins une fois.")
 
 st.subheader("1. Matchs_Ce_Soir & Paris à prendre")
 if st.session_state["matchs_df"] is not None and not st.session_state["matchs_df"].empty:
