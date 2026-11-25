@@ -124,9 +124,13 @@ def _run_pipeline(end_year: int, do_sync: bool, custom_matchs: pd.DataFrame | No
     st.session_state["matchs_df"] = clean_display_df
 
     if do_sync:
-        try:
-            updated_matchs = push_all_to_google_sheets(projections, stats, matchs_df=clean_display_df)
-            if updated_matchs is not None and not updated_matchs.empty:
+        updated_matchs = push_all_to_google_sheets(
+    projections,
+    stats,
+    matchs_df=clean_display_df,
+    full_matchs_df=full_df,
+)
+         if updated_matchs is not None and not updated_matchs.empty:
                 st.session_state["matchs_df"] = _drop_cols_defg_app(updated_matchs)
             st.success(f"Stats, matchs du soir, absents ({out_src or 'manuel'}) et signaux synchronisés sur Google Sheets.")
         except Exception as exc:
