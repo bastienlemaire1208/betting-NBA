@@ -49,6 +49,7 @@ for key, default_val in [
     ("out_source", ""),
     ("projections", None),
     ("manual_ps3838_lines", {}),
+    ("ps3838_slate_sig", ""),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default_val
@@ -60,10 +61,28 @@ def _reset_pipeline_state() -> None:
         st.session_state[key] = None if key != "out_source" else ""
 
 
+def _compute_slate_signature(df: pd.DataFrame | None) -> str:
+    """Identifie de manière unique la liste des matchs du slate en cours."""
+    if df is None or df.empty or "Match" not in df.columns:
+        return ""
+    matches = [str(m).strip() for m in df["Match"].tolist() if str(m).strip()]
+    return "||".join(matches)
+
+
+def _sync_ps3838_memory_with_slate(df: pd.DataFrame) -> None:
+    """Conserve les lignes PS3838 tant que la liste des matchs est identique ; sinon réinitialise."""
+    current_sig = _compute_slate_signature(df)
+    prev_sig = st.session_state.get("ps3838_slate_sig", "")
+    if current_sig and current_sig != prev_sig:
+        st.session_state["manual_ps3838_lines"] = {}
+    st.session_state["ps3838_slate_sig"] = current_sig
+
+
 def _apply_saved_ps3838_lines(df: pd.DataFrame) -> pd.DataFrame:
     """Réapplique les lignes PS3838 (Total et Handicap Home) saisies manuellement par match."""
     if df is None or df.empty:
         return df
+    _sync_ps3838_memory_with_slate(df)
     out = df.copy()
     if "PS3838_Total" not in out.columns:
         out["PS3838_Total"] = np.nan
@@ -188,8 +207,8 @@ if st.session_state.get("out_source"):
 if st.session_state.get("full_matchs_df") is not None and not st.session_state["full_matchs_df"].empty:
     with st.expander("🎯 Lignes PS3838 du soir — Total & Handicap (sans taper de signe moins)", expanded=True):
         st.caption(
-            "Entre `PS3838_Total` (ex. `238`), puis pour le handicap choisis qui est **Favori** (`Home` ou `Away`) "
-            "et saisis uniquement l'écart positif (ex. `4.5` pour -4.5)."
+            "Les lignes saisies restent en mémoire tant que la liste des matchs est identique. "
+            "Entre `PS3838_Total`, choisis `Favori` (`Home` ou `Away`) et saisis `Handicap_Abs` (valeur positive)."
         )
         base_lines_df = _apply_saved_ps3838_lines(st.session_state["full_matchs_df"]).reset_index(drop=True)
         saved_map = dict(st.session_state.get("manual_ps3838_lines") or {})
@@ -248,7 +267,21 @@ if st.session_state.get("full_matchs_df") is not None and not st.session_state["
             key="ps3838_helper_editor",
         )
 
-        if st.button("⚡ Recalculer avec ces lignes PS3838", use_container_width=True):
+        col_recalc, col_clear = st.columns([3, 1])
+        with col_recalc:
+            recalc_ps_clicked = st.button("⚡ Recalculer avec ces lignes PS3838", use_container_width=True)
+        with col_clear:
+            clear_ps_clicked = st.button("🧹 Effacer les lignes PS3838", use_container_width=True)
+
+        if clear_ps_clicked:
+            st.session_state["manual_ps3838_lines"] = {}
+            cleaned_full = base_lines_df.copy()
+            cleaned_full["PS3838_Total"] = np.nan
+            cleaned_full["PS3838_Home_Spread"] = np.nan
+            st.session_state["full_matchs_df"] = cleaned_full
+            st.rerun()
+
+        if recalc_ps_clicked:
             if st.session_state.get("stats") is not None:
                 merged_df = base_lines_df.copy()
                 for idx, r in edited_helper.iterrows():
