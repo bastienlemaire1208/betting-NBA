@@ -21,36 +21,36 @@ DEFAULT_MARGIN_STD = 13.8        # Écart-type par défaut d'un écart de score 
 
 # Dictionnaire canonique des 30 franchises NBA (mapping TeamRankings / BRef / NBA API / PS3838)
 TEAM_CANONICAL_MAP = {
-    "Atlanta": "ATL", "Atlanta Hawks": "ATL", "ATL": "ATL",
-    "Boston": "BOS", "Boston Celtics": "BOS", "BOS": "BOS",
-    "Brooklyn": "BKN", "Brooklyn Nets": "BKN", "BRK": "BKN", "BKN": "BKN",
-    "Charlotte": "CHA", "Charlotte Hornets": "CHA", "CHO": "CHA", "CHA": "CHA",
-    "Chicago": "CHI", "Chicago Bulls": "CHI", "CHI": "CHI",
-    "Cleveland": "CLE", "Cleveland Cavaliers": "CLE", "CLE": "CLE",
-    "Dallas": "DAL", "Dallas Mavericks": "DAL", "DAL": "DAL",
-    "Denver": "DEN", "Denver Nuggets": "DEN", "DEN": "DEN",
-    "Detroit": "DET", "Detroit Pistons": "DET", "DET": "DET",
-    "Golden State": "GSW", "Golden State Warriors": "GSW", "GSW": "GSW", "GS": "GSW",
-    "Houston": "HOU", "Houston Rockets": "HOU", "HOU": "HOU",
-    "Indiana": "IND", "Indiana Pacers": "IND", "IND": "IND",
-    "LA Clippers": "LAC", "Los Angeles Clippers": "LAC", "LAC": "LAC",
-    "LA Lakers": "LAL", "Los Angeles Lakers": "LAL", "LAL": "LAL",
-    "Memphis": "MEM", "Memphis Grizzlies": "MEM", "MEM": "MEM",
-    "Miami": "MIA", "Miami Heat": "MIA", "MIA": "MIA",
-    "Milwaukee": "MIL", "Milwaukee Bucks": "MIL", "MIL": "MIL",
-    "Minnesota": "MIN", "Minnesota Timberwolves": "MIN", "MIN": "MIN",
-    "New Orleans": "NOP", "New Orleans Pelicans": "NOP", "NOP": "NOP", "NO": "NOP",
-    "New York": "NYK", "New York Knicks": "NYK", "NYK": "NYK", "NY": "NYK",
-    "Okla City": "OKC", "Oklahoma City Thunder": "OKC", "Oklahoma City Thunder": "OKC", "OKC": "OKC",
-    "Orlando": "ORL", "Orlando Magic": "ORL", "ORL": "ORL",
-    "Philadelphia": "PHI", "Philadelphia 76ers": "PHI", "PHI": "PHI",
-    "Phoenix": "PHX", "Phoenix Suns": "PHX", "PHO": "PHX", "PHX": "PHX",
-    "Portland": "POR", "Portland Trail Blazers": "POR", "POR": "POR",
-    "Sacramento": "SAC", "Sacramento Kings": "SAC", "SAC": "SAC",
-    "San Antonio": "SAS", "San Antonio Spurs": "SAS", "SAS": "SAS", "SA": "SAS",
-    "Toronto": "TOR", "Toronto Raptors": "TOR", "TOR": "TOR",
-    "Utah": "UTA", "Utah Jazz": "UTA", "UTA": "UTA",
-    "Washington": "WAS", "Washington Wizards": "WAS", "WAS": "WAS",
+    "ATLANTA": "ATL", "ATLANTA HAWKS": "ATL", "ATL": "ATL",
+    "BOSTON": "BOS", "BOSTON CELTICS": "BOS", "BOS": "BOS",
+    "BROOKLYN": "BKN", "BROOKLYN NETS": "BKN", "BRK": "BKN", "BKN": "BKN",
+    "CHARLOTTE": "CHA", "CHARLOTTE HORNETS": "CHA", "CHO": "CHA", "CHA": "CHA",
+    "CHICAGO": "CHI", "CHICAGO BULLS": "CHI", "CHI": "CHI",
+    "CLEVELAND": "CLE", "CLEVELAND CAVALIERS": "CLE", "CLE": "CLE",
+    "DALLAS": "DAL", "DALLAS MAVERICKS": "DAL", "DAL": "DAL",
+    "DENVER": "DEN", "DENVER NUGGETS": "DEN", "DEN": "DEN",
+    "DETROIT": "DET", "DETROIT PISTONS": "DET", "DET": "DET",
+    "GOLDEN STATE": "GSW", "GOLDEN STATE WARRIORS": "GSW", "GSW": "GSW", "GS": "GSW",
+    "HOUSTON": "HOU", "HOUSTON ROCKETS": "HOU", "HOU": "HOU",
+    "INDIANA": "IND", "INDIANA PACERS": "IND", "IND": "IND",
+    "LA CLIPPERS": "LAC", "LOS ANGELES CLIPPERS": "LAC", "LAC": "LAC",
+    "LA LAKERS": "LAL", "LOS ANGELES LAKERS": "LAL", "LAL": "LAL",
+    "MEMPHIS": "MEM", "MEMPHIS GRIZZLIES": "MEM", "MEM": "MEM",
+    "MIAMI": "MIA", "MIAMI HEAT": "MIA", "MIA": "MIA",
+    "MILWAUKEE": "MIL", "MILWAUKEE BUCKS": "MIL", "MIL": "MIL",
+    "MINNESOTA": "MIN", "MINNESOTA TIMBERWOLVES": "MIN", "MIN": "MIN",
+    "NEW ORLEANS": "NOP", "NEW ORLEANS PELICANS": "NOP", "NOP": "NOP", "NO": "NOP",
+    "NEW YORK": "NYK", "NEW YORK KNICKS": "NYK", "NYK": "NYK", "NY": "NYK",
+    "OKLA CITY": "OKC", "OKLAHOMA CITY": "OKC", "OKLAHOMA CITY THUNDER": "OKC", "OKC": "OKC",
+    "ORLANDO": "ORL", "ORLANDO MAGIC": "ORL", "ORL": "ORL",
+    "PHILADELPHIA": "PHI", "PHILADELPHIA 76ERS": "PHI", "PHI": "PHI",
+    "PHOENIX": "PHX", "PHOENIX SUNS": "PHX", "PHO": "PHX", "PHX": "PHX",
+    "PORTLAND": "POR", "PORTLAND TRAIL BLAZERS": "POR", "POR": "POR",
+    "SACRAMENTO": "SAC", "SACRAMENTO KINGS": "SAC", "SAC": "SAC",
+    "SAN ANTONIO": "SAS", "SAN ANTONIO SPURS": "SAS", "SAS": "SAS", "SA": "SAS",
+    "TORONTO": "TOR", "TORONTO RAPTORS": "TOR", "TOR": "TOR",
+    "UTAH": "UTA", "UTAH JAZZ": "UTA", "UTA": "UTA",
+    "WASHINGTON": "WAS", "WASHINGTON WIZARDS": "WAS", "WAS": "WAS", "WSH": "WAS",
 }
 
 CANONICAL_TO_FULL = {
@@ -66,8 +66,11 @@ CANONICAL_TO_FULL = {
     "TOR": "Toronto Raptors", "UTA": "Utah Jazz", "WAS": "Washington Wizards",
 }
 
+
 def normalize_team(name: str) -> str:
     if not isinstance(name, str):
         return ""
-    cleaned = name.strip()
-    return TEAM_CANONICAL_MAP.get(cleaned, cleaned.upper())
+    cleaned = name.strip().upper()
+    if not cleaned:
+        return ""
+    return TEAM_CANONICAL_MAP.get(cleaned, cleaned)
