@@ -50,7 +50,7 @@ TEAM_CANONICAL_MAP = {
     "San Antonio": "SAS", "San Antonio Spurs": "SAS", "SAS": "SAS", "SA": "SAS",
     "Toronto": "TOR", "Toronto Raptors": "TOR", "TOR": "TOR",
     "Utah": "UTA", "Utah Jazz": "UTA", "UTA": "UTA",
-    "Washington": "WSH", "Washington Wizards": "WAS", "WAS": "WAS",
+    "Washington": "WAS", "Washington Wizards": "WAS", "WAS": "WAS",
 }
 
 CANONICAL_TO_FULL = {
