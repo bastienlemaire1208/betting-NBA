@@ -109,6 +109,30 @@ def _drop_cols_defg_app(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=cols_to_drop).copy()
 
 
+def _attach_signals_by_match(display_df: pd.DataFrame, proj_df: pd.DataFrame) -> pd.DataFrame:
+    """Aligne Signal_Total et Signal_Handicap par nom de Match pour éviter tout décalage."""
+    if display_df is None or display_df.empty:
+        return display_df
+    out = display_df.copy()
+    if "Signal_Total" not in out.columns:
+        out["Signal_Total"] = "NO BET"
+    if "Signal_Handicap" not in out.columns:
+        out["Signal_Handicap"] = "NO BET"
+
+    if proj_df is None or proj_df.empty or "Match" not in out.columns or "Match" not in proj_df.columns:
+        return out
+
+    proj_indexed = proj_df.drop_duplicates(subset=["Match"]).set_index("Match")
+    for idx, r in out.iterrows():
+        m_key = str(r.get("Match", "")).strip()
+        if m_key in proj_indexed.index:
+            if "Signal_Total" in proj_indexed.columns:
+                out.at[idx, "Signal_Total"] = proj_indexed.loc[m_key, "Signal_Total"]
+            if "Signal_Handicap" in proj_indexed.columns:
+                out.at[idx, "Signal_Handicap"] = proj_indexed.loc[m_key, "Signal_Handicap"]
+    return out
+
+
 def _extract_value_bets_only(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
@@ -161,11 +185,9 @@ def _run_pipeline(end_year: int, do_sync: bool, custom_matchs: pd.DataFrame | No
     )
     st.session_state["projections"] = projections
 
-    # Table épurée (sans colonnes D, E, F, G) pour l'app et Matchs_Ce_Soir
+    # Table épurée (sans colonnes D, E, F, G) pour l'app et Matchs_Ce_Soir, alignée par Match
     clean_display_df = _drop_cols_defg_app(full_df)
-    if not projections.empty and not clean_display_df.empty and len(projections) == len(clean_display_df):
-        clean_display_df["Signal_Total"] = projections["Signal_Total"].values
-        clean_display_df["Signal_Handicap"] = projections["Signal_Handicap"].values
+    clean_display_df = _attach_signals_by_match(clean_display_df, projections)
     st.session_state["matchs_df"] = clean_display_df
 
     if do_sync:
@@ -177,7 +199,10 @@ def _run_pipeline(end_year: int, do_sync: bool, custom_matchs: pd.DataFrame | No
                 full_matchs_df=full_df,
             )
             if updated_matchs is not None and not updated_matchs.empty:
-                st.session_state["matchs_df"] = _drop_cols_defg_app(updated_matchs)
+                st.session_state["matchs_df"] = _attach_signals_by_match(
+                    _drop_cols_defg_app(updated_matchs),
+                    projections,
+                )
             st.success(f"Stats, matchs du soir, absents ({out_src or 'manuel'}) et signaux synchronisés sur Google Sheets.")
         except Exception as exc:
             st.warning(f"Calcul terminé, mais la synchronisation Google Sheets a échoué : {exc}")
