@@ -41,7 +41,7 @@ TEAM_CANONICAL_MAP = {
     "Minnesota": "MIN", "Minnesota Timberwolves": "MIN", "MIN": "MIN",
     "New Orleans": "NOP", "New Orleans Pelicans": "NOP", "NOP": "NOP", "NO": "NOP",
     "New York": "NYK", "New York Knicks": "NYK", "NYK": "NYK", "NY": "NYK",
-    "Okla City": "OKC", "Oklahoma City": "OKC", "Oklahoma City Thunder": "OKC", "OKC": "OKC",
+    "Okla City": "OKC", "Oklahoma City Thunder": "OKC", "Oklahoma City Thunder": "OKC", "OKC": "OKC",
     "Orlando": "ORL", "Orlando Magic": "ORL", "ORL": "ORL",
     "Philadelphia": "PHI", "Philadelphia 76ers": "PHI", "PHI": "PHI",
     "Phoenix": "PHX", "Phoenix Suns": "PHX", "PHO": "PHX", "PHX": "PHX",
@@ -50,7 +50,7 @@ TEAM_CANONICAL_MAP = {
     "San Antonio": "SAS", "San Antonio Spurs": "SAS", "SAS": "SAS", "SA": "SAS",
     "Toronto": "TOR", "Toronto Raptors": "TOR", "TOR": "TOR",
     "Utah": "UTA", "Utah Jazz": "UTA", "UTA": "UTA",
-    "Washington": "WAS", "Washington Wizards": "WAS", "WAS": "WAS",
+    "Washington": "WSH", "Washington Wizards": "WAS", "WAS": "WAS",
 }
 
 CANONICAL_TO_FULL = {
